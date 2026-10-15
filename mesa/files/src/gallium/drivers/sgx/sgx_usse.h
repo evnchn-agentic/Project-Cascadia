@@ -104,6 +104,14 @@ uint64_t usse_smp3d(enum usse_smp_out out, enum usse_smp_coord coord, struct uss
  * channel select reaches channel 2 but not 3). */
 uint64_t usse_unpack_unorm8(struct usse_reg dest, struct usse_reg src, unsigned chan);
 
+/* (M38) four F16 at once, each a register pair (four F16): src1 op src2,
+ * channel for channel */
+uint64_t usse_hop(enum usse_nmad_op op, struct usse_reg dest, struct usse_reg src1,
+                  struct usse_reg src2);
+/* dest = the four F16 of the pair src packed to 8 bits each, scaled from
+ * [0, 1] */
+uint64_t usse_pack_unorm8_f16(struct usse_reg dest, struct usse_reg src);
+
 /* o<dest> = four F32 values packed to 8 bits each, scaled from [0, 1]:
  * src, src + 1 (a pair) and src + 2, src + 3; src even */
 uint64_t usse_pack_unorm8(unsigned dest_o, struct usse_reg src);

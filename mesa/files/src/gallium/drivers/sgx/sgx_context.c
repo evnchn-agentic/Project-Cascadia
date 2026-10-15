@@ -132,8 +132,9 @@ sgx_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence, unsigned 
       } else if (++ctx->stat_frames, now - ctx->stat_t0 >= 2000000000ll) {
          double s = (now - ctx->stat_t0) / 1e9;
 
-         mesa_logi("sgx: %.1f fps, %.1f renders and %.1f draws a frame, %.0f%% CPU, "
-                   "%.0f%% waiting for the GPU", ctx->stat_frames / s,
+         mesa_logi("sgx: %.1f fps at %ux%u (viewport %.0fx%.0f), %.1f renders and %.1f draws a frame, %.0f%% CPU, "
+                   "%.0f%% waiting for the GPU", ctx->stat_frames / s, ctx->fb.width, ctx->fb.height,
+                   fabsf(ctx->viewport.scale[0]) * 2, fabsf(ctx->viewport.scale[1]) * 2,
                    (double)ctx->stat_renders / ctx->stat_frames,
                    (double)ctx->stat_draws / ctx->stat_frames,
                    100.0 * (cpu - ctx->stat_cpu0) / (now - ctx->stat_t0),

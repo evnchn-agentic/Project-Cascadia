@@ -56,6 +56,12 @@ CASES = {
     'kill_p1_end': ('SPEC', '', 0xf9340426c0000280),
     # c03_loop's pixel program, c04_loop_break's (skipinv clear there)
     'or_o0_sa14': ('VBW', 'or o0, sa14, #0x0', 0x50850009e0000700),
+    # M38: F16, four channels an instruction (iOS's s00, s03, s11)
+    'mul_f16_pa0_pa2_pa0': ('V16NMAD', 'mul.f16 pa0.xyzw, pa2.xyzw, pa0.xyzw', 0x10a44786a0040040),
+    'mul_f16_pa0_pa0_pa2': ('V16NMAD', 'mul.f16 pa0.xyzw, pa0.xyzw, pa2.xyzw', 0x10a44786a0040001),
+    'mul_f16_pa0_pa0_sa6': ('V16NMAD', 'mul.f16 pa0.xyzw, pa0.xyzw, sa6.xyzw', 0x10a44786b0040003),
+    'pack_f16_o0_pa0': ('VPCK', 'pck.u8.f16 o0.xyzw, pa0.xyzw scale', 0x40850a3da01d8000),
+    'pack_f16_pa0_pa0': ('VPCK', 'pck.u8.f16 pa0.xyzw, pa0.xyzw scale', 0x40810a3ea01d8000),
     # M37: the logic ops of iOS's es1 cases e03..e10
     'xor_o0_pa0_o0': ('VBW', 'xor o0, pa0, o0', 0x5884000190000000),
     'and_o0_pa0_o0': ('VBW', 'and o0, pa0, o0', 0x5084000190000000),

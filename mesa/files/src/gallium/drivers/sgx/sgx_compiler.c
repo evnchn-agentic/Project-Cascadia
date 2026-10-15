@@ -23,7 +23,9 @@
  *    a channel into o0.
  *
  * Speed (F16 for mediump, two lanes an instruction, constants from the
- * hardware's table, sharing loaded constants) comes later.
+ * hardware's table, sharing loaded constants) comes later -- but for one
+ * kind of program, a colour of varyings and texels multiplied and added,
+ * which is all F16, four lanes an instruction (M38, f16_colour()).
  */
 #include "sgx_compiler.h"
 
@@ -122,6 +124,7 @@ struct comp {
     * (o0): src1 the colour unless swapped (M25) */
    bool sop2, sop2_swap;
    struct usse_sop2 sop2_factors;
+   bool f16;                            /* the whole program F16's (M38: f16_colour) */
    int logicop;                         /* GL's logic op (pipe_logicop), -1 none (M37) */
    struct operand colour[4];
    bool have_colour[4];
@@ -2083,6 +2086,172 @@ store_outputs_early(nir_shader *s)
    }
 }
 
+/* ---- a colour of four F16 at once (M38) -----------------------------------
+ *
+ * iOS's SDL sprite (corpus s00, s03, s11): the colour iterated and the
+ * texel fetched as F16 by the PDS, two registers each (four F16 a 64-bit
+ * register), then `mul.f16 pa0.xyzw, pa2.xyzw, pa0.xyzw`, `pck.u8.f16`,
+ * the SOP2 that blends -- four instructions where the general way takes
+ * nine (texels unpacked to F32, a channel an instruction).  A pixel's cost
+ * is its instructions (M34), and SuperTux's frame is SDL's sprites.
+ *
+ * Taken when the colour is, channel for channel, one tree of fmul and
+ * fadd over varyings (each channel its own: no swizzle) and the PDS's
+ * lookups, nothing else in the program: no other input, constant,
+ * uniform, discard, branch, blending in the program or logic op.  The
+ * colour goes to 8 bits: F16's 11 bits of mantissa are what mediump's are,
+ * and enough for highp's colour too. */
+#define F16_NODES 16
+
+struct f16_node {
+   enum { F16_INPUT, F16_TEXEL, F16_MUL, F16_ADD } kind;
+   unsigned a, b;                       /* the operands' nodes; a leaf's index */
+};
+
+struct f16_tree {
+   struct f16_node node[F16_NODES];
+   unsigned n;
+};
+
+/* channel chan of the colour, s, as tree t's nodes (from 0: the same
+ * shape for every channel), its root; -1 if it is not such a tree */
+static int
+f16_match(const struct comp *c, nir_scalar s, unsigned chan, struct f16_tree *t)
+{
+   s = nir_scalar_chase_movs(s);
+   if (nir_scalar_is_alu(s)) {
+      nir_op op = nir_scalar_alu_op(s);
+      int a, b;
+
+      if ((op != nir_op_fmul && op != nir_op_fadd) || t->n == F16_NODES ||
+          (a = f16_match(c, nir_scalar_chase_alu_src(s, 0), chan, t)) < 0 ||
+          (b = f16_match(c, nir_scalar_chase_alu_src(s, 1), chan, t)) < 0)
+         return -1;
+      t->node[t->n] = (struct f16_node){ op == nir_op_fmul ? F16_MUL : F16_ADD, a, b };
+      return t->n++;
+   }
+   if (nir_def_instr(s.def)->type == nir_instr_type_tex) {
+      for (unsigned k = 0; k < c->nfetch; k++)
+         if (&c->fetch[k]->instr == nir_def_instr(s.def) && s.comp == chan && t->n < F16_NODES) {
+            t->node[t->n] = (struct f16_node){ F16_TEXEL, k, 0 };
+            return t->n++;
+         }
+      return -1;
+   }
+   if (nir_scalar_is_intrinsic(s) &&
+       nir_def_as_intrinsic(s.def)->intrinsic == nir_intrinsic_load_input) {
+      nir_intrinsic_instr *in = nir_def_as_intrinsic(s.def);
+      int slot = input_slot(in);
+
+      if (slot < 0 || c->input_of_slot[slot] < 0 || t->n == F16_NODES ||
+          nir_intrinsic_component(in) + s.comp != chan)
+         return -1;
+      t->node[t->n] = (struct f16_node){ F16_INPUT, (unsigned)c->input_of_slot[slot], 0 };
+      return t->n++;
+   }
+   return -1;
+}
+
+static bool
+f16_colour(struct comp *c, nir_function_impl *impl)
+{
+   nir_intrinsic_instr *out = NULL;
+   struct f16_tree t[4] = { 0 };
+   int root[4];
+   unsigned reg[F16_NODES], ntemp = 0;
+   struct usse_reg o0 = usse_reg(USSE_OUTPUT, 0), colour;
+
+   if (getenv("SGX_NO_F16") || c->vs || c->kills || c->ncolours || c->logicop >= 0 ||
+       c->nuniforms || exec_list_length(&impl->body) != 1)
+      return false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic) {
+            nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+
+            if (in->intrinsic == nir_intrinsic_store_output) {
+               if (out || nir_intrinsic_component(in) || nir_intrinsic_write_mask(in) != 0xf ||
+                   in->src[0].ssa->num_components != 4)
+                  return false;
+               out = in;
+            } else if (in->intrinsic != nir_intrinsic_load_input) {
+               return false;
+            }
+         } else if (instr->type == nir_instr_type_tex) {
+            if (!is_fetch(c, instr))
+               return false;
+         } else if (instr->type != nir_instr_type_alu &&
+                    instr->type != nir_instr_type_load_const) {
+            /* (constants: the outputs' offsets; one in the colour is not a
+             * leaf f16_match() takes) */
+            return false;
+         }
+      }
+   }
+   if (!out)
+      return false;
+   for (unsigned i = 0; i < c->ninputs; i++)
+      if (c->fs->input_slot[i] == VARYING_SLOT_POS)
+         return false;
+   for (unsigned ch = 0; ch < 4; ch++) {
+      if ((root[ch] = f16_match(c, nir_get_scalar(out->src[0].ssa, ch), ch, &t[ch])) < 0 ||
+          t[ch].n != t[0].n || root[ch] != root[0] ||
+          memcmp(t[ch].node, t[0].node, t[0].n * sizeof(t[0].node[0])))
+         return false;
+   }
+   /* every input and lookup the program reads is in the tree */
+   {
+      unsigned inputs = 0, fetches = 0;
+
+      for (unsigned k = 0; k < t[0].n; k++) {
+         if (t[0].node[k].kind == F16_INPUT)
+            inputs |= 1u << t[0].node[k].a;
+         else if (t[0].node[k].kind == F16_TEXEL)
+            fetches |= 1u << t[0].node[k].a;
+      }
+      if (inputs != (1u << c->ninputs) - 1 || fetches != (1u << c->nfetch) - 1)
+         return false;
+   }
+   /* the code: inputs in pa(2i), texels after them, two registers each;
+    * each operation into a temporary pair of its own */
+   util_dynarray_init(&c->code, NULL);
+   emit(c, USSE_PHAS);
+   for (unsigned k = 0; k < t[0].n; k++) {
+      const struct f16_node *nd = &t[0].node[k];
+
+      switch (nd->kind) {
+      case F16_INPUT:
+         reg[k] = 2 * nd->a;
+         break;
+      case F16_TEXEL:
+         reg[k] = 2 * c->ninputs + 2 * nd->a;
+         break;
+      default:
+         reg[k] = 0x100 + 2 * ntemp++;
+         emit(c, usse_hop(nd->kind == F16_MUL ? USSE_NMAD_MUL : USSE_NMAD_ADD,
+                          treg(c, reg[k] - 0x100),
+                          reg[nd->a] >= 0x100 ? treg(c, reg[nd->a] - 0x100) :
+                                                usse_reg(USSE_PA, reg[nd->a]),
+                          reg[nd->b] >= 0x100 ? treg(c, reg[nd->b] - 0x100) :
+                                                usse_reg(USSE_PA, reg[nd->b])));
+         break;
+      }
+   }
+   colour = reg[root[0]] >= 0x100 ? treg(c, reg[root[0]] - 0x100) : usse_reg(USSE_PA, reg[root[0]]);
+   if (c->sop2) {
+      struct usse_reg packed = treg(c, 2 * ntemp++);
+
+      emit(c, usse_pack_unorm8_f16(packed, colour));
+      emit(c, usse_sop2(o0, c->sop2_swap ? o0 : packed, c->sop2_swap ? packed : o0,
+                        &c->sop2_factors) | USSE_END);
+   } else {
+      emit(c, usse_pack_unorm8_f16(o0, colour) | USSE_END);
+   }
+   c->top = MAX2(c->top, 2 * ntemp);
+   c->f16 = true;
+   return true;
+}
+
 static bool
 translate(struct comp *c, nir_shader *s)
 {
@@ -2151,6 +2320,9 @@ translate(struct comp *c, nir_shader *s)
    scan(c, impl);
    if (c->failed)
       return false;
+   /* M38: a colour of four F16 at once -- the whole program */
+   if (c->fs && f16_colour(c, impl))
+      return true;
 
    /* the numbering, the liveness, then the code, in the same order */
    index = 0;
@@ -2326,7 +2498,8 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
    if (!translate(&c, s))
       goto out;
    out_at = util_dynarray_num_elements(&c.code, uint64_t);
-   output(&c);
+   if (!c.f16)
+      output(&c);
    if (c.failed)
       goto out;
    /* a pixel's registers, primary attributes and temporaries: 65 (an
@@ -2336,6 +2509,7 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
       fail(&c, "%u registers a pixel", align(4 * c.ninputs + c.ncolours + c.nfetch, 4) + c.top);
       goto out;
    }
+   c.fs->prog.f16 = c.f16;
 
    c.fs->prog.ncode = util_dynarray_num_elements(&c.code, uint64_t);
    c.fs->prog.code = MALLOC(c.fs->prog.ncode * sizeof(uint64_t));

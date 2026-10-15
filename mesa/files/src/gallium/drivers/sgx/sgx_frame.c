@@ -224,6 +224,10 @@ iterate_control(const struct sgx_pixel_program *p, unsigned i)
    unsigned v = p->iter_src[i];
    uint32_t w = i == p->ninputs - 1 ? ITERATE_F32_VEC4 : ITERATE_F32_VEC4_MORE;
 
+   /* (M38) as F16: format 2 (iOS's e20, s00: 2fc0x00f) */
+   if (p->f16)
+      w |= 2u << 28;
+
    if (v == SGX_ITERATE_POSITION)
       w |= v << 12;
    else if (v < p->ncolours)
@@ -242,15 +246,22 @@ iterates_colour(const struct sgx_pixel_program *p, unsigned i)
 }
 
 /* the primary attributes the PDS fills: four an input, one a colour, one a
- * texel */
+ * texel -- two each as F16 (M38) */
 static unsigned
 pixel_pa(const struct sgx_pixel_program *p)
 {
-   unsigned n = p->nfetch;
+   unsigned n = p->f16 ? 2 * p->nfetch : p->nfetch;
 
    for (unsigned i = 0; i < p->ninputs; i++)
-      n += iterates_colour(p, i) ? 1 : 4;
+      n += p->f16 ? 2 : iterates_colour(p, i) ? 1 : 4;
    return n;
+}
+
+/* input i's iterate DOUT's size: four registers, one a colour, two F16 */
+static unsigned
+iterate_size(const struct sgx_pixel_program *p, unsigned i)
+{
+   return p->f16 ? 0x12 : iterates_colour(p, i) ? 0x02 : 0x32;
 }
 
 static uint32_t
@@ -1759,7 +1770,7 @@ upload(struct sgx_frame *f, struct sgx_pixel_program *p)
    data = n;
    pds[n++] = PDS_DOUTU_ROW0_ITER;
    for (unsigned i = 0; i < p->ninputs; i++)
-      pds[n++] = pds_iterate(3 + i, iterates_colour(p, i) ? 0x02 : 0x32);
+      pds[n++] = pds_iterate(3 + i, iterate_size(p, i));
    pds[n++] = PDS_END;
    p->pds_va = pds_va;
    p->pds_rows = data / 4;
@@ -2235,6 +2246,9 @@ fetch_pds(struct sgx_frame *f, const struct sgx_pixel_program *p, const uint32_t
          pds[n++] = 0;
       state[k] = n;
       memcpy(pds + n, sa + p->fetch_sa[k], 4 * sizeof(uint32_t));
+      /* (M38) the texel F16: state word 3's bit 31, as iOS's s00 */
+      if (p->f16)
+         pds[n + 3] |= 0x80000000u;
       n += 4;
    }
    while (n % 4)
@@ -2242,10 +2256,11 @@ fetch_pds(struct sgx_frame *f, const struct sgx_pixel_program *p, const uint32_t
    data = n;
    pds[n++] = PDS_DOUTU_ROW0_ITER;
    for (unsigned i = 0; i < p->ninputs; i++)
-      pds[n++] = pds_iterate(3 + i, iterates_colour(p, i) ? 0x02 : 0x32);
+      pds[n++] = pds_iterate(3 + i, iterate_size(p, i));
+   /* (an F16 texel: iOS's 07040c52 and the texture DOUT of kind 024) */
    for (unsigned k = 0; k < p->nfetch; k++) {
-      pds[n++] = pds_iterate(ctrl[k], FETCH_SIZE_RAW);
-      pds[n++] = pds_texture(state[k]);
+      pds[n++] = pds_iterate(ctrl[k], p->f16 ? 0x52 : FETCH_SIZE_RAW);
+      pds[n++] = pds_texture(state[k]) | (p->f16 ? 0x020 : 0);
    }
    pds[n++] = PDS_END;
    if (!(dst = (uint32_t *)arena_alloc(f, n * 4, 16, &va)))

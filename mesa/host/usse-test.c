@@ -64,6 +64,11 @@ main(void)
    P("vtst_pa4", usse_vtst_bits(0, PA(4), true));
    P("kill_p1_end", usse_kill(2) | USSE_END);
    P("or_o0_sa14", usse_vbw_or(O(0), SA(14), 0) | USSE_END);
+   P("mul_f16_pa0_pa2_pa0", usse_hop(USSE_NMAD_MUL, PA(0), PA(2), PA(0)));
+   P("mul_f16_pa0_pa0_pa2", usse_hop(USSE_NMAD_MUL, PA(0), PA(0), PA(2)));
+   P("mul_f16_pa0_pa0_sa6", usse_hop(USSE_NMAD_MUL, PA(0), PA(0), SA(6)));
+   P("pack_f16_o0_pa0", usse_pack_unorm8_f16(O(0), PA(0)) | USSE_END);
+   P("pack_f16_pa0_pa0", usse_pack_unorm8_f16(PA(0), PA(0)));
    P("xor_o0_pa0_o0", usse_vbw(USSE_VBW_XOR, O(0), PA(0), O(0), false) | USSE_END);
    P("and_o0_pa0_o0", usse_vbw(USSE_VBW_AND, O(0), PA(0), O(0), false) | USSE_END);
    P("or_o0_pa0_o0", usse_vbw(USSE_VBW_OR, O(0), PA(0), O(0), false) | USSE_END);

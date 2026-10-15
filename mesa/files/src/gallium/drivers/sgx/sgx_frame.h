@@ -136,6 +136,9 @@ struct sgx_pixel_program {
    unsigned pds_rows;
    bool branches;               /* its pixels each on its own: the code branches, not
                                  * alike for all (M20, M33) */
+   /* (M38) its inputs iterated and its lookups' texels fetched as F16, two
+    * registers each (iOS's SDL sprite, corpus s00) */
+   bool f16;
 };
 
 /* Triangles into rt, over what it holds (each tile starts as the target's
