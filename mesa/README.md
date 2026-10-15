@@ -116,6 +116,10 @@ SGX_ISP_OFFSET=1 sgx-gl gloffset # the ISP's polygon offset instead of the draw 
 SGX_DEBUG=copies sgx-gl glupload # each texture copy the CPU makes: whole, a box, a new buffer
 SGX_DEBUG=fps,flushes desktop    # the per-2 s report for the X server (it never swaps): its
                                  # renders, where they were flushed from (M37)
+SGX_NO_F16=1 sgx-gl glfetch      # the colour as F32 even where it could be F16 (M38)
+SGX_DEBUG=fps PROGRAM            # also the target's size and the viewport at the frame's end
+python3 ukbd.py 20 & supertux-mesa.sh LEVEL   # SuperTux on KMS, Tux run right by a uinput
+                                 # keyboard (tools/sgx; M38)
 SGX_TEX_NATIVE=0 sgx-gl glupload # every texture copied as RGBA8 (M36's way)
 SGX_LINEAR_TEX=1 sgx-gl glupload # every texture of one level sampled linear (0: never)
 SGX_STATE=16:0x200 sgx-gl glflat # which vertex's colour a triangle takes (finding flat

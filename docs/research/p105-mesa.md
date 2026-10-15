@@ -2806,6 +2806,85 @@ stipple and smooth lines.
 - Polygon offset's clamp; gl_PointCoord (VARYING_SLOT_PNTC); 3D textures;
   F16 arithmetic.
 
+## M38: F16 colours; what SuperTux's frames take to the screen
+
+**Where SuperTux's frame went** (world 1's first level, Tux running right:
+`tools/sgx/ukbd.py`, a uinput keyboard, on KMS; xdotool under X). Two
+measurements had misled:
+
+- On KMS SuperTux had drawn into a corner of the screen: its config kept a
+  test's fullscreen size, 384 x 512. `SGX_DEBUG=fps` prints the target's
+  size and the last viewport now (768 x 1024; SDL's viewport 922 x 1152,
+  the picture right).
+- SDL batches draws only when no renderer is named or
+  `SDL_RENDER_BATCHING=1`: supertux-mesa.sh named GLES 2's, and a frame
+  was 355 draws on KMS against 31 under X. Batched, SuperTux on KMS runs
+  at **66.7 fps**, its own limit (64 logical frames a second, a step of
+  1000 / 64 ms rounded down to 15), with 29 % of a core and no wait for
+  the GPU (unbatched: 87 %); every frame is a flip (251 atomic commits in
+  4 s). Its render takes the GPU 7.2 ms (`SGX_DEBUG=fps,sync`), the
+  flip's copy of the plane 2.2 ms (debugfs `copy`: 768 x 512 in 1.15 ms).
+
+Under X (batched, desktop GL) it was 42.5 fps, three quarters of the time
+waiting for a fence: `SGX_TRACE_WAITS=1` (the caller of every wait of 1 ms
+or more) shows `dri_flush`'s throttle, the render of the frame before. The
+GPU is shared: the X server's glamor makes about 80 renders a second (a
+draw each), xfwm4's GL compositor one a frame; compositing off changes
+nothing. And what reaches the screen is less than what SuperTux draws:
+**every page flip succeeds, but there are 30 a second** (119 in 4 s, the
+X server's ioctls and their results through `perf record -e
+raw_syscalls:sys_enter -e raw_syscalls:sys_exit`), and nothing else shows
+a frame (no DIRTYFB). The kernel's screen has no vblank counter
+(`CRTC_GET_SEQUENCE`: EOPNOTSUPP), so Present has no MSC: each frame's
+target is the same, and one queued behind a pending flip is scrapped when
+the next arrives. With page flips off (`Option "PageFlip" "off"`) X copies
+and calls DIRTYFB instead -- 30 a second again, most of the calls
+interrupted (ERESTARTSYS) and made again.
+
+**F16 colours.** iOS's SDL sprite (M35) is all F16, four channels an
+instruction:
+
+- The PDS iterates the varyings as F16 (the iterate's format 2, bits
+  29:28; two registers a varying, DOUT size 0x12) and fetches the texels as
+  F16 (state word 3 bit 31; iOS's `07040c52`: the iterate DOUT 0x52 and
+  the texture DOUT's kind 0x024).
+- V16NMAD (opcode 0x02) has V32NMAD's fields, each operand a register pair
+  of four F16: `mul.f16 pa0.xyzw, pa2.xyzw, pa0.xyzw` (`usse_hop`).
+- VPCK from F16 (source format 5): `pck.u8.f16 o0.xyzw, pa0.xyzw scale`
+  (`usse_pack_unorm8_f16`). Five of iOS's words in usse-test, bit for bit.
+
+The compiler makes a fragment program so (`f16_colour()`) when its colour
+is, channel for channel, one tree of fmul and fadd over varyings and the
+PDS's lookups (no swizzles, at most 16 nodes, each an instruction into a
+temporary pair) and the program reads nothing else: no uniform, constant,
+gl_FragCoord, TA colour, discard, branch or logic op. Blending stays
+SOP2's after the pack. F16's 11 bits are mediump's; a highp colour made
+so loses what F16 loses in sums that nearly cancel, and goes to 8 bits
+anyway. `SGX_NO_F16=1`: none so.
+
+SDL's sprite 8 -> 3 instructions (9 -> 4 blended). Release builds:
+`glspeed 8 30 fill` (eight blended layers of the whole 768 x 1024 target)
+30.0 -> 16.1 ms a frame, 2 ms a layer, unblended 26.8 -> 16.2;
+`glspeed 1000 30 sprites` 34.6 -> 25.8 ms. SuperTux's render on the GPU
+12.0 -> 7.2 ms; under X it draws 42.5 -> 53 fps, and 58-62 with the X
+server and xfwm4 on the build too -- of which the screen shows 30 (above);
+on KMS 66.7 either way (unbatched, the heavy parts' GPU waits go: 58-60 ->
+62-64). dEQP-GLES2 16 859 / 91 (r37's 16 858 / 92 and one more pass:
+`tmp_array.vec3_dynamic_write_dynamic_read_fragment`), no new failure, no
+timeout; the regression tests 18 of 18, their F16 programs (glfetch,
+gltex, gldesk, glvary) among them.
+
+**What is next:**
+
+- A vblank for the screen (a timer at the mode's 60 Hz, the flip's event
+  sent once its copy is done), so that Present has an MSC and shows every
+  frame under X.
+- F16 for more programs: uniforms (iOS's t06, `mul.f16 pa0, pa0, sa6`:
+  the uniforms written as F16 into sa), constants, an X8 texture's alpha
+  of 1 (glamor's copies of a 24-bit window), swizzles.
+- Tux stood still under X this time (strun's xdotool keys did not move
+  him): the X numbers are of the level's start.
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the

@@ -1303,6 +1303,11 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   texture copies: `SGX_DEBUG=copies`. A window drag in XFCE: drive it with
   xdotool (`mousemove X Y mousedown 1`, steps, `mouseup 1`) and read the X
   server's CPU in `/proc/$(pidof Xorg)/stat` or `perf record -p`.
+- M38 (p105-mesa.md): F16 colour programs (`SGX_NO_F16=1`: none). SuperTux
+  on KMS with Tux running: `python3 tools/sgx/ukbd.py 20 & TIME=34
+  SGX_DEBUG=fps supertux-mesa.sh .../world1/welcome_antarctica.stl` (a
+  uinput keyboard; under X `xdotool`). Who waits for a fence:
+  `SGX_TRACE_WAITS=1` (the caller of each wait of 1 ms or more).
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.
@@ -1319,3 +1324,8 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
 | SuperTux `--renderer opengl` exits ("Missing GL version", GL_MAJOR_VERSION) | SuperTux 0.6.3 asks GL 3's query in its GL 2 path: `--renderer sdl` (tools/sgx/supertux-mesa.sh) |
 | `perf probe -x libgallium ...` (uprobes) and the renders fail | the driver is Thumb code and the probes break it: remove them (`echo > /sys/kernel/tracing/uprobe_events`); count with `perf record -e raw_syscalls:sys_enter --filter 'id == 54'` (ioctls) instead |
 | `ssh cascadia 'pkill -f NAME ...'` and the ssh session dies | `-f` matches the ssh's own shell, whose command line has NAME: `pkill -x` |
+| SuperTux on KMS fast, but drawn in a corner of the screen | its config (`~/.local/share/supertux2/config`) kept a test's `fullscreen_width`/`_height` (384 x 512): put the screen's back; `SGX_DEBUG=fps` prints the target's size and the viewport |
+| SuperTux 355 draws a frame on KMS, 31 under X | SDL batches only when no renderer is named: `SDL_RENDER_BATCHING=1` with `SDL_RENDER_DRIVER` (supertux-mesa.sh has it) |
+| SuperTux under X slower than on KMS while its CPU idles | the X server's and xfwm4's renders share the GPU: compare with X itself on the build (`SGX_MESA=/root/sgx-mesa-rel /root/sgx-dev desktop`), not SuperTux alone |
+| a program's fps under X is not what the screen shows | without a vblank counter Present scraps frames: count the X server's page flips (`perf record -e raw_syscalls:sys_enter -e raw_syscalls:sys_exit --filter 'id == 54' -p $(pidof Xorg)`, `c01864b0`) |
+| SuperTux stuck at 66.7 fps | its own limit: 64 logical frames a second, 15 ms a step |
