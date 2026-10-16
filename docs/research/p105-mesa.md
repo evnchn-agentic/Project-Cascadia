@@ -2982,6 +2982,58 @@ frames a second on the screen**, no wait for the GPU, twice in a row; the
 desktop is composited again when it exits (a screenshot: panel, icons,
 shadows).
 
+## M41: the screen turned by the copy onto it
+
+The first step towards turning the screen with an accelerometer: the
+turn itself. X's own (`xrandr --rotate left`) works on modesetting, but as
+a shadow buffer glamor redraws turned every frame, page flips off:
+SuperTux 24 fps, about 17 of them shown (DIRTYFB stalls).
+
+**In the kernel.** The screen is a copy anyway -- the 2D engine's quad
+from the framebuffer onto the scanout memory (M16) -- and the quad's
+vertex order is its texture's corners (top-left, bottom-left,
+bottom-right, top-right, p105-gpu.md): a quarter turn anticlockwise is
+those corners moved round by one (`__sgx_blt_run`'s `rot`), a copy that
+costs what it did. The plane has a `rotation` property (0, 90, 180, 270);
+a damaged rectangle (framebuffer coordinates) goes to the screen through
+`drm_rect_rotate()` -- what DRM's own plane checks use -- its edges out to
+16 pixels in the framebuffer's x and, turned a quarter, in its y (then the
+screen's x). Framebuffers may be the screen on its side (the minimum size
+the shorter side: 1024 x 768 was refused at first).
+
+`tools/sgx/gl/kmsrot.c` (no X; the text console unbound while it runs --
+fbcon blinks its cursor into the same memory): each rotation committed
+with a buffer whose every pixel is its own, the screen read back through
+`/dev/fb0` against `drm_rect_rotate`'s place for each pixel, then a box
+changed and shown with DIRTYFB alone -- all four rotations right, whole
+and damaged.
+
+**In X.** The kernel refuses an X server atomic modesetting (`broken
+atomic modeset userspace detected` -- modesetting's `Option "Atomic"`
+does nothing), and without it modesetting never sees the primary plane.
+`tools/desktop/xorg-server/xorg-server-plane-rotation.patch`: the
+primary plane and its rotation found with universal planes (allowed);
+a RandR rotation the plane has is its own (`driverIsPerformingTransform`:
+no shadow buffer); a change of turn is the CRTC off, the plane's rotation
+set, then SetCrtc with the buffer of the turned size (the kernel's SetCrtc
+takes the plane's turn into account, and checks a turn against the buffer
+shown -- apart, either is refused); and the DIRTYFB clips are the screen's
+own, not turned as for a shadow (first: the screen's top quarter never
+updated). `tools/desktop/xorg-server/build.sh install`: Alpine's
+xorg-server 21.1.25 with it, 21.1.25-r103 (LTO links two threads each --
+four at once, fifteen threads each, ran docker's 8 GB out).
+
+`rotate [normal|left|inverted|right]` (`tools/desktop/rotate.sh`, on the
+iPad in /usr/local/bin) turns the screen and the touch screen with it
+(libinput's Coordinate Transformation Matrix: for left x' = 1 - v, y' =
+u). Turned left SuperTux runs in its own landscape, 1024 x 768, at **62-66
+fps, every frame shown**; inverted 64-66. The desktop right in all four
+(`/dev/fb0` read back: xwd shows the screen unturned).
+
+**What is next:** the accelerometer (an IIO device, a mount matrix),
+iio-sensor-proxy and a session daemon calling `rotate`; the side switch as
+the rotation lock; touch checked by hand in each turn.
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the

@@ -1321,6 +1321,13 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   in docker (armhf, ~3 min) and installs it (4.20.0-r102), then `xfwm4
   --replace` in the session. Back to Alpine's: `apk add xfwm4=4.20.0-r1`
   (with a network). A new Alpine xfwm4 release replaces it on `apk upgrade`.
+- M41: the screen turned by the plane (the kernel's copy turned):
+  `rotate left|right|inverted|normal` (no argument: the turn now) turns X
+  and the touch screen; it needs the patched X server
+  (`sh tools/desktop/xorg-server/build.sh install`, 21.1.25-r103, ~10 min
+  in docker), otherwise X turns a shadow buffer (24 fps). `sgx-gl kmsrot`
+  (X stopped) checks the four turns pixel by pixel. The physical screen:
+  `cat /dev/fb0` (768 x 1024 BGRA) -- xwd shows the unturned one.
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.
@@ -1341,6 +1348,7 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
 | SuperTux 355 draws a frame on KMS, 31 under X | SDL batches only when no renderer is named: `SDL_RENDER_BATCHING=1` with `SDL_RENDER_DRIVER` (supertux-mesa.sh has it) |
 | SuperTux under X slower than on KMS while its CPU idles | the X server's and xfwm4's renders share the GPU: compare with X itself on the build (`SGX_MESA=/root/sgx-mesa-rel /root/sgx-dev desktop`), not SuperTux alone |
 | a program's fps under X is not what the screen shows | composited, the screen shows xfwm4's frames: count the X server's page flips and DIRTYFBs (`perf record -e raw_syscalls:sys_enter -e raw_syscalls:sys_exit --filter 'id == 54' -p $(pidof Xorg)`, `python3 tools/sgx/ioret.py`: `c01864b0`, `c01864b1`); a window's bypass hint and depth: `tools/sgx/xwinfo.py` |
+| `Option "Atomic" "on"` in X's config does nothing | the kernel refuses atomic to any process named X* (`broken atomic modeset userspace detected` in dmesg): the patched modesetting turns the plane with legacy calls |
 | `xfconf-query` over ssh changes nothing (compositing "off" and still on) | it needs the session's D-Bus: `export $(tr '\0' '\n' < /proc/$(pgrep -x xfwm4)/environ \| grep -E '^(DBUS_SESSION_BUS_ADDRESS\|DISPLAY)=' \| xargs)` first |
 | SuperTux stuck at 66.7 fps | its own limit: 64 logical frames a second, 15 ms a step |
 
