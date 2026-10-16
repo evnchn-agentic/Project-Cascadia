@@ -2806,7 +2806,7 @@ stipple and smooth lines.
 - Polygon offset's clamp; gl_PointCoord (VARYING_SLOT_PNTC); 3D textures;
   F16 arithmetic.
 
-## M38: F16 colours; what SuperTux's frames take to the screen
+## M38: F16 colours; what SuperTux's frames take to the screen; a vblank
 
 **Where SuperTux's frame went** (world 1's first level, Tux running right:
 `tools/sgx/ukbd.py`, a uinput keyboard, on KMS; xdotool under X). Two
@@ -2828,18 +2828,31 @@ measurements had misled:
 Under X (batched, desktop GL) it was 42.5 fps, three quarters of the time
 waiting for a fence: `SGX_TRACE_WAITS=1` (the caller of every wait of 1 ms
 or more) shows `dri_flush`'s throttle, the render of the frame before. The
-GPU is shared: the X server's glamor makes about 80 renders a second (a
-draw each), xfwm4's GL compositor one a frame; compositing off changes
-nothing. And what reaches the screen is less than what SuperTux draws:
-**every page flip succeeds, but there are 30 a second** (119 in 4 s, the
-X server's ioctls and their results through `perf record -e
-raw_syscalls:sys_enter -e raw_syscalls:sys_exit`), and nothing else shows
-a frame (no DIRTYFB). The kernel's screen has no vblank counter
-(`CRTC_GET_SEQUENCE`: EOPNOTSUPP), so Present has no MSC: each frame's
-target is the same, and one queued behind a pending flip is scrapped when
-the next arrives. With page flips off (`Option "PageFlip" "off"`) X copies
-and calls DIRTYFB instead -- 30 a second again, most of the calls
-interrupted (ERESTARTSYS) and made again.
+GPU is shared, and the gpu_scheduler and dma_fence tracepoints (`perf
+record -a -e gpu_scheduler:drm_run_job ...`) show with what: SuperTux's
+window is composited. xfwm4 4.20 leaves a fullscreen window out of the
+composition only when `_NET_WM_BYPASS_COMPOSITOR` is 1 on the window it
+composites -- the frame it made -- and SDL sets it on its own window, the
+frame's child. So the X server copies each frame into the window's pixmap
+(glamor, 2.5 ms of GPU), xfwm4 draws the screen with GL (the root's
+texture from pixmap, a rectangle texture with an alpha of 1, in the
+program: 7.4 ms) and flips it: per 33 ms two SuperTux renders, xfwm4's,
+three copies, the GPU full -- and 30 frames a second on the screen (the X
+server's page flips, xfwm4's: `perf record -e raw_syscalls:sys_enter -e
+raw_syscalls:sys_exit --filter 'id == 54' -p $(pidof Xorg)`, the ioctls
+and their results). With compositing off SuperTux under X is at its 66.7
+too, every frame shown (66 DIRTYFB a second, no wait for the GPU). (Off
+means through the session's D-Bus: `xfconf-query` from ssh without it
+changes nothing, and the first measurements here were all composited.)
+
+**The screen's vblank.** The kernel's screen had none
+(`CRTC_GET_SEQUENCE`: EOPNOTSUPP): Present ran without an MSC, GL programs
+under X unpaced. A timer at the mode's 60 Hz stands for the interrupt now
+(`drm_vblank_init`, `enable_vblank` starts an hrtimer that calls
+`drm_crtc_handle_vblank`), and the driver's own commit tail sends a
+commit's event as soon as its copy is done, with the count it is, and waits
+for no vblank before the old framebuffers go. glxgears under X: 60.0 fps;
+SuperTux on KMS a commit a frame, 66.7, as before.
 
 **F16 colours.** iOS's SDL sprite (M35) is all F16, four channels an
 instruction:
@@ -2867,7 +2880,7 @@ SDL's sprite 8 -> 3 instructions (9 -> 4 blended). Release builds:
 30.0 -> 16.1 ms a frame, 2 ms a layer, unblended 26.8 -> 16.2;
 `glspeed 1000 30 sprites` 34.6 -> 25.8 ms. SuperTux's render on the GPU
 12.0 -> 7.2 ms; under X it draws 42.5 -> 53 fps, and 58-62 with the X
-server and xfwm4 on the build too -- of which the screen shows 30 (above);
+server and xfwm4 on the build too -- of which the screen shows 30 composited, 66.7 not;
 on KMS 66.7 either way (unbatched, the heavy parts' GPU waits go: 58-60 ->
 62-64). dEQP-GLES2 16 859 / 91 (r37's 16 858 / 92 and one more pass:
 `tmp_array.vec3_dynamic_write_dynamic_read_fragment`), no new failure, no
@@ -2876,9 +2889,9 @@ gltex, gldesk, glvary) among them.
 
 **What is next:**
 
-- A vblank for the screen (a timer at the mode's 60 Hz, the flip's event
-  sent once its copy is done), so that Present has an MSC and shows every
-  frame under X.
+- Composition that costs less: xfwm4's program (a rectangle texture's
+  scale in it, an alpha of 1) as an F16 PDS lookup -- or fullscreen games
+  left out of it (xfwm4 reads the bypass hint from its frame).
 - F16 for more programs: uniforms (iOS's t06, `mul.f16 pa0, pa0, sa6`:
   the uniforms written as F16 into sa), constants, an X8 texture's alpha
   of 1 (glamor's copies of a 24-bit window), swizzles.
