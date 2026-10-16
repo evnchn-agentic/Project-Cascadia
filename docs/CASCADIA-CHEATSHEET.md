@@ -1308,6 +1308,11 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   SGX_DEBUG=fps supertux-mesa.sh .../world1/welcome_antarctica.stl` (a
   uinput keyboard; under X `xdotool`). Who waits for a fence:
   `SGX_TRACE_WAITS=1` (the caller of each wait of 1 ms or more).
+- M39: `glproj` (projective and rectangle lookups the PDS makes, the
+  vertex side scaling the coordinates; `SGX_NO_PROJ_FETCH=1` in the
+  program). A program the X server or xfwm4 compiles: restart it with the
+  variables, e.g. `SGX_DEBUG_NIR=1 xfwm4 --replace` with the session's
+  environment (`/proc/$(pgrep -x xfwm4)/environ`).
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.

@@ -2898,6 +2898,55 @@ gltex, gldesk, glvary) among them.
 - Tux stood still under X this time (strun's xdotool keys did not move
   him): the X numbers are of the level's start.
 
+## M39: projective and rectangle lookups by the PDS -- xfwm4's composition
+
+xfwm4 composites with GL: the root's buffer as a texture from pixmap, a
+rectangle texture, drawn with the fixed function by `glBegin(GL_QUADS)`.
+st's fragment program for it (`SGX_DEBUG_NIR=1` with `xfwm4 --replace`):
+`texture2DRect` of `TEX0.xy * scale / TEX0.w` -- NIR's lower_txp
+and the rectangle's load_texture_scale -- 17 instructions, an SMP in the
+program, 7.4 ms a frame of 768 x 1024.
+
+**Coordinates the vertex side makes ready** (`lower_fetch_coords()`).
+Where a lookup's x and y are a varying's x and y times the rectangle's
+scale and 1 / its z or w, and nothing else reads the varying, the lookup
+is made at the varying's own x and y -- the PDS's -- and the vertex side
+does the rest (`sgx_fs.vary_fix`, `SGX_FIX_*`): x and y times 1 / width, 1
+/ height (`fix_sa`, two sa words a varying, the draw's), the divisor
+moved to w. The PDS's projective lookup is kind 2 of the control word's
+lower half (`0x0c00f200`, iOS's s08 `0c00fa00`), and it **divides by w**:
+glproj with the divisor in z draws wrong, and the GLSL linker had packed a
+vec4 whose z nothing read into a vec3 (x, y, w), the divisor in z and w
+1. On the GPU's vertex path such a varying's values are kept to the end,
+as the position's (`vertex_output()`); on the CPU's (the draw module:
+quads, xfwm4's) `fix_varyings()` does it to the vertices. A lookup that
+gets ready but does not become the PDS's fails the compile rather than
+sample unscaled. `SGX_NO_PROJ_FETCH=1`: none so.
+
+xfwm4's program is then a texel and the pack -- F16 (M38), 2 instructions
+-- and its frame 7.4 -> 2.8 ms of GPU. SuperTux composited: **30 -> 41-45
+frames a second on the screen** (204 and 227 page flips in 5 s, the
+second with all of X on the system's Mesa), 59-66 drawn. The
+rest is four passes over the screen for each frame shown: SuperTux's
+render (7.2 ms), the X server's copy of it into the window's pixmap
+(Present, 2.5 ms: glamor's copy is already F16, 2 instructions -- the
+fill's floor), glamor's composition of the window into xfwm4's buffer
+(2.5) and xfwm4's own (2.8): about 850 ms of GPU a second, so 60
+composited is out of reach. Uncomposited (M38) every frame is shown.
+
+`tools/sgx/gl/glproj.c`: texture2DProj of a vec4 (z junk) and of a vec3, a
+vec4 whose z the program reads besides (left alone), w across the quad
+(against the division in the program), texture2DRect, texture2DRectProj,
+two lookups of one varying, the fixed function's rectangle texture by
+quads and by triangles (RGB, alpha from the colour), q 2 on a rectangle
+and a 2D texture -- 13 of 13, and with `SGX_NO_PROJ_FETCH=1`. dEQP-GLES2
+16 859 / 91, the same cases as M38's run; the regression tests 19 of 19.
+
+**What is next:** fullscreen windows out of the composition -- xfwm4
+reads `_NET_WM_BYPASS_COMPOSITOR` from its frame, SDL sets it on its own
+window (a patched xfwm4, or the hint copied to the frame before it maps);
+quads on the GPU's vertex path (lists, as strips and fans are).
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the
