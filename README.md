@@ -97,11 +97,16 @@ including the parts that didn't work.
       console. bluez is in the image: `bluetooth pair NAME`, `bluetooth auto
       on` to have it back at every boot. See `docs/research/p105-bluetooth.md`
 - [x] **Buttons and backlight** — Home, Hold, volume and the side switch are
-      `gpio-keys`. Volume up/down set the backlight (32 steps, 1 to 400 nits),
-      Hold switches the screen off and on and ignores the touchscreen while
-      it is dark (`/sbin/p105-keys`, started at boot). The backlight is
+      `gpio-keys`. The side switch picks what volume up/down set: with its
+      orange mark showing, the backlight (32 steps, 1 to 400 nits); the other
+      way, the speakers' volume (16 steps of 4 dB, and off). Hold switches the
+      screen off and on and ignores the touchscreen while it is dark
+      (`/sbin/p105-keys`, started at boot). The backlight is
       `/sys/class/backlight/apple-pmu-wled`, 0..2047, the PMU's LED current
       DAC; see `docs/research/p105-backlight.md`
+- [x] **Speakers** — ALSA card `iPadMini`: both speakers, DMA, 32/44.1/48 kHz;
+      `aplay`, SDL and OpenAL play through it (`tools/audio/audio-setup.sh`
+      once, for alsa-utils and mixing). See `docs/research/p105-audio.md`
 - [x] **Battery gauge** — the bq27540 on its one-wire HDQ bus:
       `/sys/class/power_supply/battery` (charge, voltage, current,
       temperature, cycles), so `fastfetch` and desktop panels show it.

@@ -298,7 +298,8 @@
 	 * active low -- read live, docs/research/p105-gpio.md.  Hold is the
 	 * power key; Home is KEY_HOMEPAGE, as on Linux phones.  The side switch
 	 * (mute or rotation lock on iOS; the ADT's ringer A/B, pin 4) is a
-	 * switch, SW_MUTE_DEVICE -- its polarity not checked live yet.  The
+	 * switch, SW_MUTE_DEVICE: 1 with its orange mark showing (pin low, iOS's
+	 * "mute"); p105-keys makes it pick what the volume buttons set.  The
 	 * smart-cover sensors are PMU GPIOs, not these.  Codes: KEY_HOMEPAGE
 	 * 172, KEY_POWER 116, KEY_VOLUMEUP 115, KEY_VOLUMEDOWN 114, EV_SW 5,
 	 * SW_MUTE_DEVICE 14; flags 1 = GPIO_ACTIVE_LOW.  Interrupts through the
@@ -306,7 +307,7 @@
 	 */
 	gpio-keys {
 		compatible = "gpio-keys";
-		autorepeat;	/* a held volume button keeps changing the backlight */
+		autorepeat;	/* a held volume button keeps going (volume or backlight) */
 
 		home {
 			label = "Home";

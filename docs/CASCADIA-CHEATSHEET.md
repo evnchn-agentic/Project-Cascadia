@@ -1371,6 +1371,11 @@ amixer -c iPadMini                      Left/Right Speaker Volume: 0..228,
 ```
 SDL (SuperTux) and OpenAL use ALSA's `default`, nothing to set.
 
+The buttons (`/sbin/p105-keys`, log in `/tmp/p105-keys.log`): side switch
+with the orange mark showing -> volume up/down set the backlight; the other
+way -> the speakers' volume, 16 steps of 4 dB (-48..+12 dB) and off, both
+amps. It works with the screen off too.
+
 Research tools (out of the image): `tools/audio/audmmio.c` (MMIO script
 runner: `r w m p d f t c q s`), `tools/audio/spk-tone.sh` (the speakers by
 hand, no driver), `tools/audio/mca-emu.py` / `i2sswitch-emu.py` (iOS's own
