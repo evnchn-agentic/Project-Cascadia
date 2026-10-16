@@ -341,7 +341,12 @@ on I2C0). Userland: `tools/audio/audio-setup.sh` (alsa-utils, dmix as
 `default`). Verified 2026-10-16 with the drivers as modules (on the
 running kernel, nodes added by `tools/audio/dtmod`): `speaker-test` and a
 continuous 10 s 440 Hz `aplay` (S16) heard clean, two `aplay`s at once
-through dmix, SDL3's ALSA driver running the card.
+through dmix, SDL3's ALSA driver running the card.  Then on the flashed image
+(kernel #304, the drivers built in): the card comes up at boot (both amps
+probe at ~2.5 s), a tone through `default` (dmix, S16_LE 48 kHz, CDMA
+channel 0x17) heard clean, and the volume buttons step the volume over
+the whole range (`tools/p105-keys.c`, the side switch picking volume or
+backlight).
 
 ## Still open
 
