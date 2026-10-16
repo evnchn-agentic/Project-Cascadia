@@ -774,6 +774,20 @@ The next in line with no particular order after the iPad mini 1/iPad 4 will like
 
 ![XFCE on the iPad, read straight out of /dev/fb0](imgs/xfce-fb0.png)
 
+## Support the Research
+
+Project Cascadia is and always will be 100% free, open-source, and licensed under GPL-2.0. 
+
+However, testing low-level code on bare metal carries hardware risks, and further research into later Apple silicon (A6X-A13) requires purchasing additional test devices
+If you find this work valuable and wish to support ongoing research, donations are greatly appreciated:
+
+[! [Litecoin](https://shields.io)] (https://blockchair.com) `LhxwyrfqN64KTfoS8Y8gAxoRjFp4t4RbCf`
+
+[! [Bitcoin](https://shields.io)] (https://blockchair.com) `bc1qmuy5zkkq6lyyg38l8quuvjehdwrzes6h96ledt`
+
+[! [USDT](https://shields.io)] (https://tronscan.org) `0x3Df78641E76C7fDD8258E0e7e4389CFC5e7e6498`
+
+
 ## Background
 
 In May 2026, while looking for an existing Linux port for the iPad mini 1, I
