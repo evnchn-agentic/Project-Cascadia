@@ -105,8 +105,9 @@ including the parts that didn't work.
       `/sys/class/backlight/apple-pmu-wled`, 0..2047, the PMU's LED current
       DAC; see `docs/research/p105-backlight.md`
 - [x] **Speakers** — ALSA card `iPadMini`: both speakers, DMA, 32/44.1/48 kHz;
-      `aplay`, SDL and OpenAL play through it (`tools/audio/audio-setup.sh`
-      once, for alsa-utils and mixing). See `docs/research/p105-audio.md`
+      `aplay`, SDL and OpenAL play through it, several at once (dmix);
+      alsa-utils and the mixing come with the image. See
+      `docs/research/p105-audio.md`
 - [x] **Battery gauge** — the bq27540 on its one-wire HDQ bus:
       `/sys/class/power_supply/battery` (charge, voltage, current,
       temperature, cycles), so `fastfetch` and desktop panels show it.

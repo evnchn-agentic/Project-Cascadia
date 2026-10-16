@@ -158,9 +158,8 @@ is true as of its date. Now:
 - the GPU, 2D: `./cascadia gpu`, then `supertux-gpu` (docs/GPU.md)
 - the GPU's OpenGL: `./cascadia mesa` -- the system's OpenGL ES 1.1/2.0 and desktop
   OpenGL 2.1 (GLX, EGL, GBM); see "THE GPU'S OPENGL" at the end
-- sound: the speakers, ALSA card `iPadMini` (DMA, 32/44.1/48 kHz, S16/S32);
-  `tools/audio/audio-setup.sh` once for alsa-utils and dmix -- see "SOUND" at
-  the end
+- sound: the speakers, ALSA card `iPadMini` (DMA, 32/44.1/48 kHz, S16/S32),
+  alsa-utils and dmix in the image -- see "SOUND" at the end
 - not there: the headphone jack and the microphones (CS42L81), USB host, NAND as Linux's own storage (planned for Pi Pico
   users, at the cost of iOS — README, "Where Linux keeps its files")
 
@@ -1356,8 +1355,9 @@ Drivers: `sound/soc/apple/s5l-audio.c` (MCA0, CDMA, the NCOs, the
 i2s-switch, the amps' MCLK; also the card) and `sound/soc/codecs/cs35l19.c`
 (the amps). Everything about the hardware: `docs/research/p105-audio.md`.
 
-Once per NFS root (alsa-utils, `/etc/asound.conf` with dmix as `default`,
-both amps at -10 dB):
+alsa-utils is a base package of the image and `/etc/asound.conf` (dmix as
+`default`, `initramfs/etc/asound.conf`) is copied onto the NFS root at every
+boot. An NFS root seeded before that lacks only the package:
 ```
 ssh root@10.55.0.2 sh -s < tools/audio/audio-setup.sh
 ```

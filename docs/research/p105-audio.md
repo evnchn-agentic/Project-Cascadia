@@ -337,8 +337,10 @@ MCA0's `+0x20` low byte is the TX FIFO level at which it asks for DMA (iOS:
   rate code; "Speaker Volume" is reg 0x10 (0..228 = -102..+12 dB).
 
 DT: `dts/p105ap.dts` (`mca_ps`, `i2s1_ps`, `audio`, `spk_left`/`spk_right`
-on I2C0). Userland: `tools/audio/audio-setup.sh` (alsa-utils, dmix as
-`default`). Verified 2026-10-16 with the drivers as modules (on the
+on I2C0). Userland: alsa-utils is a base package of the image
+(`scripts/add-base-packages.sh`) and `initramfs/etc/asound.conf` (dmix as
+`default`) is copied onto the NFS root at every boot;
+`tools/audio/audio-setup.sh` installs the package on an older NFS root. Verified 2026-10-16 with the drivers as modules (on the
 running kernel, nodes added by `tools/audio/dtmod`): `speaker-test` and a
 continuous 10 s 440 Hz `aplay` (S16) heard clean, two `aplay`s at once
 through dmix, SDL3's ALSA driver running the card.  Then on the flashed image
