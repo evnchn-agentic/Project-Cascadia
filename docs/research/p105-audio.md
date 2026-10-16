@@ -1,9 +1,11 @@
 # P105 audio — what drives the speakers
 
-**State (2026-10-16): the speakers play.** A 1 kHz tone at exactly 48 kHz
-comes out of both speakers, set up by hand from userspace
-(`tools/audio/spk-tone.sh`). The kernel driver follows the same recipe; its
-own section is at the end once it lands.
+**State (2026-10-16): the speakers play, as an ALSA card.** `iPadMini`:
+MCA0 fed by CDMA, both CS35L19 amps, 32/44.1/48 kHz, S16_LE/S32_LE;
+`aplay`, `speaker-test`, SDL all play, a continuous tone without a gap. The
+drivers are `sound/soc/apple/s5l-audio.c` and `sound/soc/codecs/cs35l19.c`
+(the last section). Before the drivers the same was done by hand from
+userspace (`tools/audio/spk-tone.sh`).
 
 The hardware facts below come from three places: the 12H321 kernelcache
 (iOS 8.4.1's drivers, read statically and **run in unicorn** where reading
@@ -157,8 +159,8 @@ speakers get:
     NCO = 6.144 MHz (MCLK = 2 × BCLK)
     start TX: +0x18 |= 1
 
-`+0x28` is the TX FIFO. **`+0x40` is the status:** bits 0-5 the TX FIFO
-level (32 words deep), bit 10 level below the `+0x20` threshold, bit 12 TX
+`+0x28` is the TX FIFO. **`+0x40` is the status:** bits 0-6 the TX FIFO
+level (it reaches 0x32, so 64 words deep), bit 10 level below the `+0x20` threshold, bit 12 TX
 underflow (write 1 to clear), bits 26/28 the RX side. iOS's interrupt handler
 reports frame error (`+0x10` bit 1), RX overflow/underflow (bits 29/28) and
 TX overflow/underflow (bits 13/12).
@@ -260,9 +262,90 @@ Power-off: all `0x10 = 0x19`, `0x06` bit 7, `0x07 = 0xfe`, wait 1 ms,
 
 Heard on the device 2026-10-16: a 1 kHz square wave from both speakers.
 
+## CDMA (cdma-version 3, `0x37000000`)
+
+From iBEC's own `drivers/apple/cdma/cdma.c` (`dma_execute_async`
+`0x9ff01c54`, `dma_continue_async` `0x9ff01f7c`, the interrupt handler
+`0x9ff022cc`; iBoot's code is linear and reads well), the register names
+from AppleCDMA's error log, and experiments:
+
+    global +0x00/+0x04  channel clocks on (a bit per channel; write 1)
+           +0x08/+0x0c  channel clocks off
+           +0x10/+0x14  channel clocks status (Linux finds 0xfffffe18, 0x7ff)
+    channel n at 0x1000 * n (n = the ADT's dma-channels number, 1..42):
+      +0x00 CSR  bit 0 run; 1 abort (write 2); 3 completion interrupt enable;
+                 16 running; 18 error, 19 done, 20 CIR (all write-1-to-clear);
+                 24-27 iBoot's 2
+      +0x04 DCR  request line in bits 16-21 (the ADT's 4th word: mca0 TX
+                 0xb), burst in 4-6 (1, 2, 4, 8, 16, 32 -> 0..5), width in
+                 2-3 (1, 2, 4 bytes -> 0, 1, 2), bit 1 memory to device.
+                 **Bit 0 locks DCR until the next boot.**
+      +0x08 DAR  the device address, 24 bits (0x196028 for MCA0's FIFO; the
+                 window's top comes with the request line)
+      +0x0c DBR  bytes left; a multiple of 16, at most 0x7ffffff0 (negative
+                 as a signed number: ERR 4)
+      +0x10 MAR  the memory address being read
+      +0x14 CAR  the command being run (32-byte aligned)
+      +0x18 ERR  4 = bad length, 0x100 = a register written while running
+      +0x20..+0x2c  the command being run, as fetched
+
+Commands are 32 bytes in memory: `{NXT, CMD, ADDR, LEN}` (+16 unused);
+`CMD = 3 | 2 << 24`, `| 0x100` on iBoot's last one, 0 stops. Start: CSR =
+0x001c0000 (clear), 2 (abort), DCR, DAR, DBR, CAR, then CSR = 0x021c0009.
+**A ring works**: the last command's NXT pointing back at the first, DBR
+0x7ffffff0, the channel runs until the count is spent (~90 minutes of 48 kHz
+32-bit stereo) and paces itself on the request line -- measured 24 frames
+every 0.5 ms into MCA0. It raises nothing while it runs, so a period clock
+has to come from elsewhere: MAR.
+
+The ADT's dma-channels word 3 (`0x00040002`) is AppleCDMA's transferControl:
+width in the low half (2 bytes), burst in the high (4); `0x00040004` is the
+32-bit variant.
+
+MCA0's `+0x20` low byte is the TX FIFO level at which it asks for DMA (iOS:
+4, i.e. ~40 µs of margin; the FIFO is then filled to ~0x30). Linux uses
+0x10.
+
+## The kernel drivers
+
+`sound/soc/apple/s5l-audio.c` (`apple,s5l8942x-audio`, `CONFIG_SND_SOC_APPLE_S5L_AUDIO`):
+
+- maps MCA0, I2S1, AE2's MCS and ACS, the i2s-switch, the NCOs and CDMA
+  (`reg-names`); power states through two `apple,s5l8940x-pmgr-clk-gate`
+  nodes (`mca_ps`, `i2s1_ps`);
+- registers **the amps' MCLK as a clock** (`#clock-cells = <0>`): enabling it
+  sets NCO1 to 12 MHz, programs I2S1 as iOS does and opens the switch's
+  reg 0x11; its parent is I2S1's power state;
+- the PCM: prepare sets NCO6 to 128 fs, resets and configures MCA0 (the
+  registers above, 16-bit samples with `+0x08 = 0x1010`), points pin1 at it
+  (`reg1 = 0xf014`) and builds a ring of one command per period; trigger
+  starts the CDMA channel (`apple,dma-channel = <0x17 0xb>`), then MCA0's TX;
+  an hrtimer at half a period reads MAR for the position and calls
+  `snd_pcm_period_elapsed`, and restarts the channel when its count runs out;
+- registers the card on a child device: the amps take MCLK from this
+  device, so it has to finish probing first, and the card has to wait for
+  them (with both in one probe, fw_devlink deadlocks).
+
+`sound/soc/codecs/cs35l19.c` (`cirrus,cs35l19`, `CONFIG_SND_SOC_CS35L19`):
+
+- regmap with single reads and writes (the chip does not step the address
+  within a transfer: a bulk read of the ID returns `35 35 35`);
+- the shared reset GPIO is taken non-exclusively and left released; the
+  amp with `cirrus,keepalive-gpios` flips it every 20 ms while powered;
+- a DAPM output driver runs iOS's power-on (with MCLK enabled first) and
+  power-off; `set_tdm_slot` gives each amp its 32-bit slot, hw_params the
+  rate code; "Speaker Volume" is reg 0x10 (0..228 = -102..+12 dB).
+
+DT: `dts/p105ap.dts` (`mca_ps`, `i2s1_ps`, `audio`, `spk_left`/`spk_right`
+on I2C0). Userland: `tools/audio/audio-setup.sh` (alsa-utils, dmix as
+`default`). Verified 2026-10-16 with the drivers as modules (on the
+running kernel, nodes added by `tools/audio/dtmod`): `speaker-test` and a
+continuous 10 s 440 Hz `aplay` (S16) heard clean, two `aplay`s at once
+through dmix, SDL3's ALSA driver running the card.
+
 ## Still open
 
-1. CDMA for real playback (PIO into MCA0's FIFO costs ~100k MMIO writes a
-   second at 48 kHz).
-2. The headphone codec (CS42L81 on SPI2, I2S0 → pin0).
-3. The amps' V/I sense back on MCA0's RX (the `0x2d..0x35` slots).
+1. The headphone codec (CS42L81 on SPI2, I2S0 → pin0) and the microphones.
+2. The amps' V/I sense back on MCA0's RX (the `0x2d..0x35` slots), and the
+   speaker protection iOS builds on it.
+3. A CDMA dmaengine driver for everything else (SPI, NAND).

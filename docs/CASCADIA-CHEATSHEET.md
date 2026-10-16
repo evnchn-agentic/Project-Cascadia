@@ -158,7 +158,10 @@ is true as of its date. Now:
 - the GPU, 2D: `./cascadia gpu`, then `supertux-gpu` (docs/GPU.md)
 - the GPU's OpenGL: `./cascadia mesa` -- the system's OpenGL ES 1.1/2.0 and desktop
   OpenGL 2.1 (GLX, EGL, GBM); see "THE GPU'S OPENGL" at the end
-- not there: USB host, NAND as Linux's own storage (planned for Pi Pico
+- sound: the speakers, ALSA card `iPadMini` (DMA, 32/44.1/48 kHz, S16/S32);
+  `tools/audio/audio-setup.sh` once for alsa-utils and dmix -- see "SOUND" at
+  the end
+- not there: the headphone jack and the microphones (CS42L81), USB host, NAND as Linux's own storage (planned for Pi Pico
   users, at the cost of iOS — README, "Where Linux keeps its files")
 
 On the device:
@@ -1341,3 +1344,46 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
 | a program's fps under X is not what the screen shows | composited, the screen shows xfwm4's frames: count the X server's page flips and DIRTYFBs (`perf record -e raw_syscalls:sys_enter -e raw_syscalls:sys_exit --filter 'id == 54' -p $(pidof Xorg)`, `python3 tools/sgx/ioret.py`: `c01864b0`, `c01864b1`); a window's bypass hint and depth: `tools/sgx/xwinfo.py` |
 | `xfconf-query` over ssh changes nothing (compositing "off" and still on) | it needs the session's D-Bus: `export $(tr '\0' '\n' < /proc/$(pgrep -x xfwm4)/environ \| grep -E '^(DBUS_SESSION_BUS_ADDRESS\|DISPLAY)=' \| xargs)` first |
 | SuperTux stuck at 66.7 fps | its own limit: 64 logical frames a second, 15 ms a step |
+
+# ═══════════════════════════════════════════════════════════════
+# SOUND (2026-10-16)
+# ═══════════════════════════════════════════════════════════════
+
+The speakers: card `iPadMini` (`cat /proc/asound/cards`), one playback device.
+MCA0 sends the samples, CDMA channel 0x17 feeds it from a ring of commands,
+the two CS35L19 amps take one 32-bit TDM slot each (left 0x40, right 0x41).
+Drivers: `sound/soc/apple/s5l-audio.c` (MCA0, CDMA, the NCOs, the
+i2s-switch, the amps' MCLK; also the card) and `sound/soc/codecs/cs35l19.c`
+(the amps). Everything about the hardware: `docs/research/p105-audio.md`.
+
+Once per NFS root (alsa-utils, `/etc/asound.conf` with dmix as `default`,
+both amps at -10 dB):
+```
+ssh root@10.55.0.2 sh -s < tools/audio/audio-setup.sh
+```
+On the device:
+```
+speaker-test -c 2 -t sine -l 1          left, then right (each ~3 s)
+aplay FILE.wav                          through dmix (several clients at once)
+aplay -D hw:iPadMini,0 FILE.wav         the card alone, no mixing
+amixer -c iPadMini                      Left/Right Speaker Volume: 0..228,
+                                        0.5 dB a step, 204 = 0 dB
+```
+SDL (SuperTux) and OpenAL use ALSA's `default`, nothing to set.
+
+Research tools (out of the image): `tools/audio/audmmio.c` (MMIO script
+runner: `r w m p d f t c q s`), `tools/audio/spk-tone.sh` (the speakers by
+hand, no driver), `tools/audio/mca-emu.py` / `i2sswitch-emu.py` (iOS's own
+MCA and switch code in unicorn), `tools/audio/dtmod` (adds the audio DT
+nodes to a running kernel, to develop the drivers as modules).
+
+| trap | what to do |
+|---|---|
+| silence, `0x16` of an amp reads `0x01` | the amp never left power-down: no MCLK (I2S1's, through the switch's reg 0x11) |
+| silence with everything running | the volume: 0x34 in reg 0x10 is -102 dB (iOS's "volume 0"), 0x19 is mute |
+| `speaker-test` "drops out" every ~3 s | it switches channels; a continuous tone in both: `aplay` a WAV |
+| a CDMA channel's DCR will not change | bit 0 of DCR locks the register until the next boot: never write it |
+| `CDMA ERR = 4` | a byte count that is negative as a signed number or not a multiple of 16 |
+| the CDMA does nothing, ERR 0x100 | a register written while the channel runs |
+| `i2cget` on 0x40/0x41: Resource busy | the driver owns them: `i2cget -f` |
+
