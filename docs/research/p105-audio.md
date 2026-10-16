@@ -348,7 +348,10 @@ through dmix, SDL3's ALSA driver running the card.  Then on the flashed image
 probe at ~2.5 s), a tone through `default` (dmix, S16_LE 48 kHz, CDMA
 channel 0x17) heard clean, and the volume buttons step the volume over
 the whole range (`tools/p105-keys.c`, the side switch picking volume or
-backlight).
+backlight).  And with the userland in the image (kernel #307), in
+a RAM-root boot with nothing installed by hand: `aplay` of a continuous
+tone through `default` (dmix) heard clean; `speaker-test`'s clicks every
+~3 s are its own channel switches, cutting the sine mid-wave.
 
 ## Still open
 

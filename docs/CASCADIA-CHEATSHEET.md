@@ -1386,7 +1386,7 @@ nodes to a running kernel, to develop the drivers as modules).
 |---|---|
 | silence, `0x16` of an amp reads `0x01` | the amp never left power-down: no MCLK (I2S1's, through the switch's reg 0x11) |
 | silence with everything running | the volume: 0x34 in reg 0x10 is -102 dB (iOS's "volume 0"), 0x19 is mute |
-| `speaker-test` "drops out" every ~3 s | it switches channels; a continuous tone in both: `aplay` a WAV |
+| `speaker-test` "drops out" or clicks every ~3 s | it switches channels and cuts the sine mid-wave; a continuous tone in both: `aplay` a WAV |
 | a CDMA channel's DCR will not change | bit 0 of DCR locks the register until the next boot: never write it |
 | `CDMA ERR = 4` | a byte count that is negative as a signed number or not a multiple of 16 |
 | the CDMA does nothing, ERR 0x100 | a register written while the channel runs |
