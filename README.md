@@ -780,6 +780,7 @@ Project Cascadia is and always will be 100% free, open-source, and licensed unde
 
 However, testing low-level code on bare metal carries hardware risks, and further research into later Apple silicon (A6X-A13) requires purchasing additional test devices
 If you find this work valuable and wish to support ongoing research, donations are greatly appreciated:
+
 [![Litecoin](https://shields.io)](https://blockchair.com) `LhxwyrfqN64KTfoS8Y8gAxoRjFp4t4RbCf`
 
 [![Bitcoin](https://shields.io)](https://blockchair.com) `bc1qmuy5zkkq6lyyg3818quuvjehdwrzes6h96ledt`
