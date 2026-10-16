@@ -2947,6 +2947,41 @@ reads `_NET_WM_BYPASS_COMPOSITOR` from its frame, SDL sets it on its own
 window (a patched xfwm4, or the hint copied to the frame before it maps);
 quads on the GPU's vertex path (lists, as strips and fans are).
 
+## M40: fullscreen games out of xfwm4's composition
+
+What M39 left of composited SuperTux was the composition itself: four
+passes over the screen for each frame shown. A fullscreen window that asks
+to bypass the compositor (`_NET_WM_BYPASS_COMPOSITOR` 1, SDL's) should not
+be composited at all, and xfwm4 4.20 never left one out:
+
+- It read the hint from the window it composites, the frame it made, which
+  no client sets -- the hint is on the client's own window (`xwinfo.py`:
+  1 on SuperTux's window, none on its frame). And the frame is added to the
+  compositor at its CreateNotify, before its client is known, so even
+  reading the client's window there would find no client.
+- `map_win()` unredirected such a window but never counted it: the X
+  server neither unmaps nor maps a window whose redirection changes
+  (composite/compalloc.c), and only a window *mapped* unredirected is
+  counted and has the overlay unmapped over it.
+
+`tools/desktop/xfwm4/xfwm4-bypass-client-window.patch`: the hint read from
+the client's window when the frame gets its client (`compositorSetClient`)
+and when the client's window changes it; `bypass_win()` unredirects such a
+fullscreen window and counts it as map_win() counts one mapped
+unredirected (the overlay unmapped while one is out), from map_win(),
+resize_win() (fullscreen after the map) and the hint's change;
+`unbypass_win()` redirects it again when it stops being fullscreen, loses
+the hint or is unmapped. `tools/desktop/xfwm4/build.sh install`: Alpine's
+APKBUILD and patch from aports (3.24-stable) with this one, pkgrel + 101,
+built by abuild in docker for armhf and installed on the iPad (4.20.0-r102;
+the only compiler warning in compositor.c is xfwm4's own, line 304).
+
+With compositing on, SuperTux's window is out of it: the X server shows
+each frame (a copy and a DIRTYFB, no page flip -- 334 in 5 s), **66.7
+frames a second on the screen**, no wait for the GPU, twice in a row; the
+desktop is composited again when it exits (a screenshot: panel, icons,
+shadows).
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the

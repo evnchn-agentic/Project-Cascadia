@@ -1313,6 +1313,12 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   program). A program the X server or xfwm4 compiles: restart it with the
   variables, e.g. `SGX_DEBUG_NIR=1 xfwm4 --replace` with the session's
   environment (`/proc/$(pgrep -x xfwm4)/environ`).
+- M40: xfwm4 patched so that fullscreen games bypass the compositor
+  (`tools/desktop/xfwm4/xfwm4-bypass-client-window.patch`):
+  `sh tools/desktop/xfwm4/build.sh install` builds Alpine's package with it
+  in docker (armhf, ~3 min) and installs it (4.20.0-r102), then `xfwm4
+  --replace` in the session. Back to Alpine's: `apk add xfwm4=4.20.0-r1`
+  (with a network). A new Alpine xfwm4 release replaces it on `apk upgrade`.
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.

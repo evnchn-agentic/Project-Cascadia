@@ -9,6 +9,10 @@
 # packages, ~490 MB on the NFS root, ~6 minutes over the cable.  Running it
 # again changes nothing that is already right.
 #
+# xfwm4 as Alpine has it composites fullscreen games too; the patched one
+# that leaves them out is built and installed from the host:
+# tools/desktop/xfwm4/build.sh install (docs/research/p105-mesa.md, M40).
+#
 # What each piece is for:
 #   xorg-server, xf86-video-fbdev   X on /dev/fb0 -- there is no DRM driver
 #   xf86-input-libinput, eudev      touch.  Xorg finds input devices through
