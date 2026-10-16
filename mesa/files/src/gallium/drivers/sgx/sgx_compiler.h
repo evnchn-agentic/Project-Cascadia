@@ -48,6 +48,19 @@ struct sgx_blend_key {
 
 #define SGX_FS_MAX_SAMPLERS 8
 
+/* (M39) what the vertex side does to a varying that only the PDS's
+ * lookups read, so that its x and y are what the texture unit takes: x
+ * and y times a rectangle texture's 1 / width, 1 / height
+ * (SGX_FIX_SCALE; the texture unit's in vary_unit[]), and the divisor of
+ * a projective lookup -- the program's z or w (SGX_FIX_DIV_Z, _W) --
+ * into w, which the PDS's projective lookup divides by (glproj: not z;
+ * iOS's s08 has a vec3's z there, its vertex program putting it in w). */
+#define SGX_FIX_SCALE   0x10
+#define SGX_FIX_DIV_Z   0x02
+#define SGX_FIX_DIV_W   0x03
+#define SGX_FIX_DIV(f)  ((f) & 3)
+#define SGX_PROJ_DIV    3       /* the component the PDS divides x and y by */
+
 /* A compiled fragment shader.  Its secondary attributes (prog.nsa words)
  * are constant buffer 0's words 0..nuniforms, then from sampler_sa four
  * state words for each texture it samples, sampler_unit[i] the unit of the
@@ -66,7 +79,11 @@ struct sgx_fs {
    int blend_sa;                                  /* -1: no blend colour */
    int scale_sa;              /* -1, or each texture's 1 / width, 1 / height (rectangles) */
    struct sgx_blend_key blend;                    /* what it was compiled for */
+   /* (M39) each varying's SGX_FIX_*, in varying_slot[]'s order */
+   uint8_t vary_fix[SGX_FRAME_MAX_VARYINGS];
+   uint8_t vary_unit[SGX_FRAME_MAX_VARYINGS];
 };
+
 
 /* A compiled vertex shader (docs/research/p105-mesa.md, M18): attribute n
  * (vertex element n) in pa4n.. as attr[n] says, uniforms (constant buffer
@@ -113,16 +130,21 @@ struct sgx_vs {
    unsigned nubuf, ubuf_sa;
    unsigned varying_slot[SGX_FRAME_MAX_VARYINGS];
    unsigned nvaryings;
+   /* (M39) the fragment shader's SGX_FIX_* for each varying, and from sa
+    * word fix_sa two words for each one SGX_FIX_SCALE, the draw's */
+   uint8_t vary_fix[SGX_FRAME_MAX_VARYINGS];
+   unsigned fix_sa;
    bool branches;                   /* the code branches (M22) */
    uint32_t code_va;                /* where the frame put it */
 };
 
 /* the attributes (vertex elements) a vertex shader reads, all told */
 unsigned sgx_vs_attr_count(const struct nir_shader *vs);
-/* attr: an SGX_ATTR for each of the sgx_vs_attr_count() attributes */
+/* attr: an SGX_ATTR for each of the sgx_vs_attr_count() attributes; fix:
+ * each varying's SGX_FIX_* (sgx_fs.vary_fix), NULL none */
 struct sgx_vs *sgx_compile_vs(const struct nir_shader *vs, const unsigned *varying_slot,
-                              unsigned nvaryings, const uint8_t *attr, char *why,
-                              unsigned why_size);
+                              unsigned nvaryings, const uint8_t *attr, const uint8_t *fix,
+                              char *why, unsigned why_size);
 void sgx_vs_destroy(struct sgx_vs *vs);
 
 /* fs is not changed; blend NULL for none.  NULL, and why in why[], when

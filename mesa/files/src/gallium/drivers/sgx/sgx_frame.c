@@ -197,6 +197,7 @@ pds_iterate(unsigned d, unsigned size)
  * The data word 1 of a program that has them: bit 3 (iOS: 0x0a, 0x0e with
  * iterates besides). */
 #define FETCH_CONTROL_2D     0x0c00f100u   /* | varying, | FETCH_LAST */
+#define FETCH_CONTROL_PROJ   0x0c00f200u   /* x and y divided (iOS's s08: 0c00fa00) */
 #define FETCH_LAST           0x800u
 #define FETCH_SIZE_RAW       0x02u
 #define PDS_FLAGS_FETCH      8u
@@ -2240,8 +2241,8 @@ fetch_pds(struct sgx_frame *f, const struct sgx_pixel_program *p, const uint32_t
       pds[n++] = iterate_control(p, i);
    for (unsigned k = 0; k < p->nfetch; k++) {
       ctrl[k] = n;
-      pds[n++] = FETCH_CONTROL_2D | (k == p->nfetch - 1 ? FETCH_LAST : 0) |
-                 (p->fetch_src[k] - p->ncolours);
+      pds[n++] = (p->fetch_proj >> k & 1 ? FETCH_CONTROL_PROJ : FETCH_CONTROL_2D) |
+                 (k == p->nfetch - 1 ? FETCH_LAST : 0) | (p->fetch_src[k] - p->ncolours);
       if (n & 1)
          pds[n++] = 0;
       state[k] = n;

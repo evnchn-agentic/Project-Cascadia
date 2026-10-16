@@ -223,6 +223,38 @@ render_set_view_index(struct vbuf_render *r, unsigned view_index)
 {
 }
 
+/* (M39) unit's texture's 1 / width, 1 / height: a rectangle texture's
+ * coordinates scaled as the sampler takes them */
+static void
+fix_scale(struct sgx_context *ctx, unsigned unit, float *scale)
+{
+   struct pipe_sampler_view *view = unit < ARRAY_SIZE(ctx->fs_views) ? ctx->fs_views[unit] : NULL;
+
+   scale[0] = view && view->texture ? 1.0f / view->texture->width0 : 1;
+   scale[1] = view && view->texture ? 1.0f / view->texture->height0 : 1;
+}
+
+/* What the vertex side does to the varyings the PDS's lookups alone read
+ * (M39, sgx_fs.vary_fix): x and y scaled, the divisor where the PDS's
+ * projective lookup divides.  v: the varyings, four floats each. */
+static void
+fix_varyings(struct sgx_context *ctx, const struct sgx_fs *fs, unsigned n, float *v)
+{
+   for (unsigned k = 0; k < n; k++, v += 4) {
+      unsigned fix = fs->vary_fix[k];
+
+      if (fix & SGX_FIX_SCALE) {
+         float scale[2];
+
+         fix_scale(ctx, fs->vary_unit[k], scale);
+         v[0] *= scale[0];
+         v[1] *= scale[1];
+      }
+      if (SGX_FIX_DIV(fix) && SGX_FIX_DIV(fix) != SGX_PROJ_DIV)
+         v[SGX_PROJ_DIV] = v[SGX_FIX_DIV(fix)];
+   }
+}
+
 /* one vertex, as the frame's vertex side takes it: x y over the target, z
  * 0, w 1, then the varyings -- the colour, and with SGX_DRAW_LAYOUT the
  * fillers around it */
@@ -248,6 +280,7 @@ emit_vertex(struct sgx_render *sr, const float *in, float *out)
    if (ctx->draw_fs) {
       /* the program's inputs, as the draw module has them */
       memcpy(out + 4, in + 4, 4 * l->nvaryings * sizeof(float));
+      fix_varyings(ctx, ctx->draw_fs, l->nvaryings, out + 4);
       return;
    }
    for (unsigned k = 0; k < l->nvaryings; k++) {
@@ -1785,12 +1818,14 @@ vs_for_draw(struct sgx_context *ctx, const struct sgx_fs *fs, const uint8_t *att
    /* (as sgx_compile_vs fills it in) */
    for (unsigned a = 0; a < SGX_VS_MAX_ATTRIBS; a++)
       key.b[a] = a < sh->vs_nattrs ? attr[a] : SGX_ATTR(SGX_ATTR_CONST, 4);
+   /* (and what it does to the varyings the PDS's lookups alone read, M39) */
    for (unsigned i = 0; i < sh->nvs; i++)
       if (sh->vs_variant[i]->nvaryings == n &&
           sgx_words_equal(sh->vs_variant[i]->varying_slot, slot, n) &&
-          sgx_words_equal(sh->vs_variant[i]->attr_words, key.w, ARRAY_SIZE(key.w)))
+          sgx_words_equal(sh->vs_variant[i]->attr_words, key.w, ARRAY_SIZE(key.w)) &&
+          !memcmp(sh->vs_variant[i]->vary_fix, fs->vary_fix, n))
          return sh->vs_variant[i];
-   if (!(vs = sgx_compile_vs(sh->nir, slot, n, attr, why, sizeof(why)))) {
+   if (!(vs = sgx_compile_vs(sh->nir, slot, n, attr, fs->vary_fix, why, sizeof(why)))) {
       mesa_logw("sgx: a vertex shader not compiled (%s): run on the CPU", why);
       sh->vs_failed = true;
       return NULL;
@@ -2141,6 +2176,13 @@ gpu_vs_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
             memcpy(ctx->vs_sa + vs->nuniforms, p, m);
          memset((uint8_t *)(ctx->vs_sa + vs->nuniforms) + m, 0, vs->nubuf * 4 - m);
       }
+   }
+   /* (M39) a rectangle texture's 1 / width, 1 / height for each varying
+    * whose x and y the vertex side scales */
+   for (unsigned k = 0, n = 0; k < vs->nvaryings; k++) {
+      if (!(vs->vary_fix[k] & SGX_FIX_SCALE))
+         continue;
+      fix_scale(ctx, ctx->draw_fs->vary_unit[k], (float *)ctx->vs_sa + vs->fix_sa + 2 * n++);
    }
    for (unsigned a = 0; a < vs->nattrs; a++) {
       float *c = (float *)ctx->vs_sa + vs->attr_sa[a];

@@ -132,6 +132,7 @@ struct sgx_pixel_program {
    unsigned nfetch;
    uint8_t fetch_src[SGX_FRAME_MAX_FETCH];
    uint8_t fetch_sa[SGX_FRAME_MAX_FETCH];
+   uint8_t fetch_proj;          /* (M39) lookup k projective: bit k (iOS's s08) */
    uint32_t code_va, pds_va;
    unsigned pds_rows;
    bool branches;               /* its pixels each on its own: the code branches, not

@@ -107,6 +107,14 @@ struct comp {
    unsigned fetch_slot[SGX_FRAME_MAX_FETCH];
    unsigned nfetch;
    bool fetch_only[VARYING_SLOT_MAX];
+   /* (M39) lookups lower_fetch_coords() gave a varying's x and y as they
+    * are, the vertex side doing the rest: each one's SGX_FIX_*; and each
+    * lookup's of the PDS (fetch[k]'s) */
+   const nir_tex_instr *fixed[SGX_FRAME_MAX_FETCH];
+   uint8_t fixed_fix[SGX_FRAME_MAX_FETCH];
+   unsigned nfixed;
+   uint8_t fetch_fix[SGX_FRAME_MAX_FETCH];
+   const uint8_t *vary_fix;             /* a vertex shader's: each varying's SGX_FIX_* */
    /* (M37) the flat-shaded varyings (st's nir_lower_flatshade: GL's
     * glShadeModel(GL_FLAT) colours): the TA's colours, two at most, each
     * iterated into one register after the inputs, its bytes as o0's --
@@ -693,13 +701,24 @@ input_slot(nir_intrinsic_instr *in)
  * own, at x and y of a varying as the PDS iterates it -- what iOS's driver
  * does for them (corpus s00..s04, s11).  Its varying's slot. */
 static int
-fetch_slot(nir_tex_instr *tex)
+fixed_index(const struct comp *c, const nir_tex_instr *tex)
+{
+   for (unsigned i = 0; i < c->nfixed; i++)
+      if (c->fixed[i] == tex)
+         return i;
+   return -1;
+}
+
+static int
+fetch_slot(const struct comp *c, nir_tex_instr *tex)
 {
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord), slot = -1;
 
+   /* (a rectangle texture's: when the vertex side scales the coordinates) */
    if (tex->op != nir_texop_tex || tex->is_shadow || tex->is_array || tex->num_srcs != 1 ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
-        tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL) ||
+        tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL &&
+        (tex->sampler_dim != GLSL_SAMPLER_DIM_RECT || fixed_index(c, tex) < 0)) ||
        coord < 0 || tex->coord_components != 2 || tex->texture_index >= MAX_UNITS)
       return -1;
    for (unsigned i = 0; i < 2; i++) {
@@ -717,6 +736,208 @@ fetch_slot(nir_tex_instr *tex)
       slot = at;
    }
    return slot;
+}
+
+/* ---- coordinates the vertex side makes ready (M39) ------------------------
+ *
+ * A projective lookup's coordinates (texture2DProj, the fixed function's
+ * TXP: x and y times 1 / z or w, NIR's lower_txp) and a rectangle
+ * texture's (x and y times 1 / its size, load_texture_scale), at a varying
+ * that nothing else reads: the lookup is made at the varying's x and y as
+ * they are, the PDS's -- its projective kind divides them -- and the
+ * vertex side does the rest to the varying (SGX_FIX_*: sgx_fs.vary_fix).
+ * xfwm4's composition, the fixed function's texture2DRect of TEX0 /
+ * TEX0.w, is one texel then. */
+
+/* a varying's component, as a load_input's scalar: its slot and which */
+static bool
+input_component(nir_scalar s, int *slot, unsigned *comp)
+{
+   nir_intrinsic_instr *in;
+   int at;
+
+   if (!nir_scalar_is_intrinsic(s) ||
+       (in = nir_def_as_intrinsic(s.def))->intrinsic != nir_intrinsic_load_input ||
+       (at = input_slot(in)) < 0 || !colour_or_generic(at) || (*slot >= 0 && at != *slot))
+      return false;
+   *slot = at;
+   *comp = nir_intrinsic_component(in) + s.comp;
+   return true;
+}
+
+/* coordinate i of tex, a product: of the varying's component i (bit 0 of
+ * have), the texture's scale's i (bit 1), 1 / the varying's z or w (bit 2,
+ * which in *div) -- each once, nothing else */
+static bool
+coord_factors(nir_scalar s, unsigned i, const nir_tex_instr *tex, unsigned *have, int *slot,
+              unsigned *div, unsigned depth)
+{
+   unsigned comp;
+
+   s = nir_scalar_chase_movs(s);
+   if (depth > 4)
+      return false;
+   if (nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == nir_op_fmul)
+      return coord_factors(nir_scalar_chase_alu_src(s, 0), i, tex, have, slot, div, depth + 1) &&
+             coord_factors(nir_scalar_chase_alu_src(s, 1), i, tex, have, slot, div, depth + 1);
+   if (nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == nir_op_frcp) {
+      if ((*have & 4) ||
+          !input_component(nir_scalar_chase_movs(nir_scalar_chase_alu_src(s, 0)), slot, &comp) ||
+          comp < 2 || comp > 3 || (*div && *div != comp))
+         return false;
+      *div = comp;
+      *have |= 4;
+      return true;
+   }
+   if (nir_scalar_is_intrinsic(s) &&
+       nir_def_as_intrinsic(s.def)->intrinsic == nir_intrinsic_load_texture_scale) {
+      nir_intrinsic_instr *in = nir_def_as_intrinsic(s.def);
+
+      if ((*have & 2) || tex->sampler_dim != GLSL_SAMPLER_DIM_RECT ||
+          !nir_src_is_const(in->src[0]) || nir_src_as_uint(in->src[0]) != tex->texture_index ||
+          s.comp != i)
+         return false;
+      *have |= 2;
+      return true;
+   }
+   if ((*have & 1) || !input_component(s, slot, &comp) || comp != i)
+      return false;
+   *have |= 1;
+   return true;
+}
+
+/* def's every use, through ALU instructions, ends in the coordinates of
+ * one of the lookups tex[] */
+static bool
+feeds_only(nir_def *def, nir_tex_instr *const *tex, unsigned n, unsigned depth)
+{
+   if (depth > 6)
+      return false;
+   nir_foreach_use_including_if(src, def) {
+      nir_instr *p;
+      bool ok = false;
+
+      if (nir_src_is_if(src))
+         return false;
+      p = nir_src_parent_instr(src);
+      if (p->type == nir_instr_type_alu) {
+         if (!feeds_only(&nir_instr_as_alu(p)->def, tex, n, depth + 1))
+            return false;
+         continue;
+      }
+      for (unsigned k = 0; k < n && !ok; k++)
+         ok = p == &tex[k]->instr;
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
+static void
+lower_fetch_coords(struct comp *c, nir_shader *s, nir_function_impl *impl)
+{
+   nir_tex_instr *cand[SGX_FRAME_MAX_FETCH];
+   int cand_slot[SGX_FRAME_MAX_FETCH];
+   uint8_t cand_fix[SGX_FRAME_MAX_FETCH];
+   unsigned ncand = 0, nplain = 0;
+   bool progress = false;
+
+   if (getenv("SGX_NOFETCH") || getenv("SGX_NO_PROJ_FETCH"))
+      return;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         nir_tex_instr *tex;
+         unsigned have[2] = { 0, 0 }, div = 0, fix;
+         int coord, slot = -1;
+
+         if (instr->type != nir_instr_type_tex)
+            continue;
+         tex = nir_instr_as_tex(instr);
+         coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+         if (tex->op != nir_texop_tex || tex->is_shadow || tex->is_array ||
+             tex->num_srcs != 1 || coord < 0 || tex->coord_components != 2 ||
+             tex->texture_index >= MAX_UNITS ||
+             (c->fs->blend.tex_depth >> tex->texture_index & 1) ||
+             (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
+              tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL &&
+              tex->sampler_dim != GLSL_SAMPLER_DIM_RECT))
+            continue;
+         for (unsigned i = 0; i < 2; i++)
+            if (!coord_factors(nir_get_scalar(tex->src[coord].src.ssa, i), i, tex, &have[i],
+                               &slot, &div, 0))
+               have[0] = 0;
+         if (!(have[0] & 1) || !(have[1] & 1) || ((have[0] ^ have[1]) & 6) ||
+             (tex->sampler_dim == GLSL_SAMPLER_DIM_RECT && !(have[0] & 2)) || c->flat[slot])
+            continue;
+         fix = (have[0] & 2 ? SGX_FIX_SCALE : 0) | (have[0] & 4 ? div : 0);
+         if (!fix) {
+            nplain++;            /* the PDS's already */
+            continue;
+         }
+         if (ncand == SGX_FRAME_MAX_FETCH)
+            continue;
+         cand[ncand] = tex;
+         cand_slot[ncand] = slot;
+         cand_fix[ncand++] = fix;
+      }
+   }
+   for (unsigned k = 0; k < ncand; k++) {
+      nir_tex_instr *same[SGX_FRAME_MAX_FETCH];
+      nir_intrinsic_instr *first = NULL;
+      unsigned n = 0;
+      bool ok = cand[k] != NULL && nplain + c->nfixed < SGX_FRAME_MAX_FETCH;
+
+      if (!cand[k])
+         continue;
+      /* every lookup of the varying the same (and the same texture's
+       * scale), nothing else reading it */
+      for (unsigned j = k; j < ncand; j++)
+         if (cand[j] && cand_slot[j] == cand_slot[k]) {
+            ok &= cand_fix[j] == cand_fix[k] &&
+                  (!(cand_fix[k] & SGX_FIX_SCALE) ||
+                   cand[j]->texture_index == cand[k]->texture_index);
+            same[n++] = cand[j];
+         }
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            nir_intrinsic_instr *in;
+
+            if (!ok || instr->type != nir_instr_type_intrinsic ||
+                (in = nir_instr_as_intrinsic(instr))->intrinsic != nir_intrinsic_load_input ||
+                input_slot(in) != cand_slot[k])
+               continue;
+            ok = feeds_only(&in->def, same, n, 0) && nir_intrinsic_component(in) == 0 &&
+                 nir_src_is_const(*nir_get_io_offset_src(in));
+            if (!first)
+               first = in;
+         }
+      }
+      ok &= first != NULL && c->nfixed + n + nplain <= SGX_FRAME_MAX_FETCH;
+      for (unsigned j = k; j < ncand; j++) {
+         if (!cand[j] || cand_slot[j] != cand_slot[k])
+            continue;
+         if (ok) {
+            nir_tex_instr *tex = cand[j];
+            nir_builder b = nir_builder_at(nir_before_instr(&tex->instr));
+            nir_def *xy = nir_load_input(&b, 2, 32,
+                                         nir_imm_int(&b, nir_src_as_uint(*nir_get_io_offset_src(first))),
+                                         .base = nir_intrinsic_base(first), .component = 0,
+                                         .dest_type = nir_intrinsic_dest_type(first),
+                                         .io_semantics = nir_intrinsic_io_semantics(first));
+
+            nir_src_rewrite(&tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src, xy);
+            c->fixed[c->nfixed] = tex;
+            c->fixed_fix[c->nfixed++] = cand_fix[j];
+            progress = true;
+         }
+         if (j != k)
+            cand[j] = NULL;
+      }
+   }
+   if (progress) {
+      nir_progress(true, impl, nir_metadata_control_flow);
+      NIR_PASS(_, s, nir_opt_dce);
+   }
 }
 
 static bool
@@ -742,10 +963,14 @@ plan_inputs(struct comp *c, nir_function_impl *impl)
          nir_foreach_instr(instr, block) {
             int slot;
 
+            int fix;
+
             if (instr->type != nir_instr_type_tex || c->nfetch == SGX_FRAME_MAX_FETCH ||
-                (slot = fetch_slot(nir_instr_as_tex(instr))) < 0 || c->flat[slot] ||
+                (slot = fetch_slot(c, nir_instr_as_tex(instr))) < 0 || c->flat[slot] ||
                 (c->fs->blend.tex_depth >> nir_instr_as_tex(instr)->texture_index & 1))
                continue;
+            fix = fixed_index(c, nir_instr_as_tex(instr));
+            c->fetch_fix[c->nfetch] = fix < 0 ? 0 : c->fixed_fix[fix];
             c->fetch_slot[c->nfetch] = slot;
             c->fetch[c->nfetch++] = nir_instr_as_tex(instr);
          }
@@ -766,6 +991,16 @@ plan_inputs(struct comp *c, nir_function_impl *impl)
    }
    for (unsigned k = 0; k < c->nfetch; k++)
       c->fetch_only[c->fetch_slot[k]] = !read[c->fetch_slot[k]];
+   /* (a lookup lower_fetch_coords() made ready is the PDS's, its varying
+    * only the lookups') */
+   for (unsigned i = 0; i < c->nfixed; i++) {
+      bool ok = false;
+
+      for (unsigned k = 0; k < c->nfetch && !ok; k++)
+         ok = c->fetch[k] == c->fixed[i] && c->fetch_only[c->fetch_slot[k]];
+      if (!ok)
+         fail(c, "a lookup made ready for the PDS not its");
+   }
    /* the inputs, as intrinsic() would number them */
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
@@ -1169,8 +1404,10 @@ intrinsic(struct comp *c, nir_intrinsic_instr *in)
                continue;
             o = resolve(nir_get_scalar(in->src[0].ssa, i));
             c->have_vout[k][comp + i] = true;
-            if (k == 0) {
-               c->vout[0][comp + i] = o;
+            /* (the position, and a varying the vertex side does more to:
+             * at the end, vertex_output()) */
+            if (k == 0 || (c->vary_fix && c->vary_fix[k - 1])) {
+               c->vout[k][comp + i] = o;
             } else {
                /* a varying straight into its output register: kept until
                 * the end, eight vec4s took more temporaries than there
@@ -1380,10 +1617,15 @@ release(struct comp *c, struct operand o, int index)
       for (unsigned i = 0; i < 4; i++)
          if (c->have_colour[i] && !c->colour[i].is_const && c->colour[i].id == o.id)
             return;
-   /* and the position's until vertex_output() has */
-   for (unsigned i = 0; c->vs && i < 4; i++)
-      if (c->have_vout[0][i] && !c->vout[0][i].is_const && c->vout[0][i].id == o.id)
-         return;
+   /* and the position's until vertex_output() has, and those of the
+    * varyings the vertex side does more to (M39) */
+   for (unsigned k = 0; c->vs && k <= c->nvaryings; k++) {
+      if (k && !(c->vary_fix && c->vary_fix[k - 1]))
+         continue;
+      for (unsigned i = 0; i < 4; i++)
+         if (c->have_vout[k][i] && !c->vout[k][i].is_const && c->vout[k][i].id == o.id)
+            return;
+   }
    if (!o.is_const && c->last_use[o.id] == index && c->owned[o.id]) {
       give_back(c, c->loc[o.id].num - (c->vs ? c->pa_base : 0));
       c->owned[o.id] = false;
@@ -1706,17 +1948,26 @@ vertex_output(struct comp *c)
       fail(c, "no position written");
       return;
    }
-   for (unsigned k = 0; k <= c->nvaryings; k++)
-      for (unsigned i = 0; i < 4; i++) {
-         struct operand o = c->vout[k][i];
+   for (unsigned k = 0, nscaled = 0; k <= c->nvaryings; k++) {
+      unsigned fix = k && c->vary_fix ? c->vary_fix[k - 1] : 0;
 
-         if (k && c->have_vout[k][i])
+      for (unsigned i = 0; i < 4; i++) {
+         /* (M39) a lookup's varying: the divisor where the PDS divides */
+         unsigned from = SGX_FIX_DIV(fix) && i == SGX_PROJ_DIV ? SGX_FIX_DIV(fix) : i;
+         struct operand o = c->vout[k][from];
+
+         if (k && c->have_vout[k][i] && !fix)
             continue;
-         if (!c->have_vout[k][i]) {
+         if (!c->have_vout[k][from]) {
             o.is_const = true;
-            o.c = i == 3 ? 1.0f : 0.0f;
+            o.c = from == 3 ? 1.0f : 0.0f;
          }
-         if (k == 0 && i < 2) {
+         if (i < 2 && (fix & SGX_FIX_SCALE)) {
+            /* x and y times a rectangle texture's 1 / width, 1 / height */
+            emit(c, usse_fop(USSE_NMAD_MUL, usse_reg(USSE_OUTPUT, 4 * k + i),
+                             get(c, o, TAKES_ALL, &s),
+                             usse_reg(USSE_SA, c->vs->fix_sa + 2 * nscaled + i)));
+         } else if (k == 0 && i < 2) {
             /* x and y as a x + b w, a and b the draw's (the TA's clip
              * rectangle, sgx_draw.c) */
             struct usse_reg t = treg(c, scratch_take(c, &s)), u = treg(c, scratch_take(c, &s));
@@ -1731,6 +1982,8 @@ vertex_output(struct comp *c)
          }
          scratch_give_back(c, &s);
       }
+      nscaled += !!(fix & SGX_FIX_SCALE);
+   }
    emit(c, USSE_EMIT_VERTEX_END);
 }
 
@@ -2295,6 +2548,8 @@ translate(struct comp *c, nir_shader *s)
          c->divergent |= nif && nir_src_is_divergent(&nif->condition);
       }
    }
+   if (c->fs)
+      lower_fetch_coords(c, s, impl);
    /* control flow left: the phis' webs registers */
    if (exec_list_length(&impl->body) != 1)
       NIR_PASS(_, s, nir_convert_from_ssa, true, false);
@@ -2591,6 +2846,13 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
          c.fs->varying_slot[c.fs->prog.nvaryings++] = c.fetch_slot[k];
       c.fs->prog.fetch_src[k] = v;
       c.fs->prog.fetch_sa[k] = c.sampler_sa + 4 * c.slot_of_unit[c.fetch[k]->texture_index];
+      /* (M39) what the vertex side does to the varying, the PDS's kind */
+      if (SGX_FIX_DIV(c.fetch_fix[k]))
+         c.fs->prog.fetch_proj |= 1u << k;
+      if (c.fetch_fix[k]) {
+         c.fs->vary_fix[v] = c.fetch_fix[k];
+         c.fs->vary_unit[v] = c.fetch[k]->texture_index;
+      }
    }
    c.fs->prog.nfetch = c.nfetch;
    c.fs->nuniforms = c.sa_uniforms;
@@ -2631,7 +2893,8 @@ sgx_vs_attr_count(const nir_shader *vs)
 
 static struct sgx_vs *
 compile_vs(const nir_shader *vs, const unsigned *varying_slot, unsigned nvaryings,
-           const uint8_t *attr, char *why, unsigned why_size, bool keep_order)
+           const uint8_t *attr, const uint8_t *fix, char *why, unsigned why_size,
+           bool keep_order)
 {
    struct comp c = { .keep_order = keep_order };
    unsigned out_at, nattr = sgx_vs_attr_count(vs);
@@ -2652,6 +2915,9 @@ compile_vs(const nir_shader *vs, const unsigned *varying_slot, unsigned nvarying
    c.nvaryings = nvaryings;
    memcpy(c.vs->varying_slot, varying_slot, nvaryings * sizeof(*varying_slot));
    c.vs->nvaryings = nvaryings;
+   if (fix)
+      memcpy(c.vs->vary_fix, fix, nvaryings);
+   c.vary_fix = c.vs->vary_fix;
    /* (past what the shader declares: constants, never read) */
    for (unsigned a = 0; a < SGX_VS_MAX_ATTRIBS; a++)
       c.vs->attr[a] = a < nattr ? attr[a] : SGX_ATTR(SGX_ATTR_CONST, 4);
@@ -2665,9 +2931,13 @@ compile_vs(const nir_shader *vs, const unsigned *varying_slot, unsigned nvarying
       nir_print_shader(s, stderr);
    if (!translate(&c, s))
       goto out;
-   /* the draw's four words for the position, after the uniforms */
+   /* the draw's four words for the position, after the uniforms, then two
+    * for each varying it scales (M39) */
    c.vs->clip_sa = c.nuniforms;
    c.nuniforms += 4;
+   c.vs->fix_sa = c.nuniforms;
+   for (unsigned k = 0; k < nvaryings; k++)
+      c.nuniforms += c.vary_fix[k] & SGX_FIX_SCALE ? 2 : 0;
    if (c.nuniforms > 128) {
       fail(&c, "uniforms past word 128");
       goto out;
@@ -2758,11 +3028,11 @@ sgx_compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *wh
 
 struct sgx_vs *
 sgx_compile_vs(const nir_shader *vs, const unsigned *varying_slot, unsigned nvaryings,
-               const uint8_t *attr, char *why, unsigned why_size)
+               const uint8_t *attr, const uint8_t *fix, char *why, unsigned why_size)
 {
-   struct sgx_vs *v = compile_vs(vs, varying_slot, nvaryings, attr, why, why_size, false);
+   struct sgx_vs *v = compile_vs(vs, varying_slot, nvaryings, attr, fix, why, why_size, false);
 
    if (!v && short_of_registers(why))
-      v = compile_vs(vs, varying_slot, nvaryings, attr, why, why_size, true);
+      v = compile_vs(vs, varying_slot, nvaryings, attr, fix, why, why_size, true);
    return v;
 }
