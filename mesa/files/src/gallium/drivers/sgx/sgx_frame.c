@@ -2396,7 +2396,9 @@ sgx_frame_render(struct sgx_frame *f, const struct sgx_frame_target *t,
       /* the vertices: the draw module's, or a vertex shader's the CPU made
        * one stream, into the render's memory (M26: else the fetch reads
        * them where they are) */
-      if (!d->vs || d->vdata) {
+      if (d->vs && d->vdata_va) {
+         vb = d->vdata_va;      /* (M42: written there, by the caller) */
+      } else if (!d->vs || d->vdata) {
          unsigned size = d->vs ? d->nverts * d->stride :
                                  d->nverts * sgx_frame_vertex_floats(&d->l) * sizeof(float);
 

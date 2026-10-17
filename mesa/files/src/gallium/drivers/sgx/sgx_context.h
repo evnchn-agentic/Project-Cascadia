@@ -45,9 +45,11 @@ struct sgx_shader {
 struct sgx_batch_draw {
    struct sgx_frame_layout l;
    /* its vertices: the draw module's, floats from first in verts; a
-    * vertex shader's the CPU made one stream (M26), bytes from first in
-    * vdata -- or none, the fetch reading the application's buffers */
+    * vertex shader's the CPU made one stream (M26), at vdata_va in one of
+    * the batch's vertex chunks (M42) -- or none, the fetch reading the
+    * application's buffers */
    unsigned first, nverts;
+   uint32_t vdata_va;
    struct sgx_pixel_program prog;       /* a copy, uploaded */
    bool compiled;
    unsigned sa;                         /* its secondary attributes, from word sa */
@@ -82,6 +84,9 @@ struct sgx_query {
 /* a render's visibility buffer for q, busy with it (sgx_batch_flush) */
 void sgx_query_add(struct sgx_query *q, struct sgx_bo *bo);
 
+#define SGX_BATCH_VCHUNKS 40
+#define SGX_BATCH_VCHUNK  (256u << 10)
+
 struct sgx_batch {
    struct pipe_resource *rt;            /* referenced */
    unsigned rt_level, rt_layer;         /* its level and face (M29) */
@@ -96,8 +101,14 @@ struct sgx_batch {
    bool counted;                        /* a draw's samples counted (M37) */
    float *verts;
    unsigned nfloats, maxfloats;
-   uint8_t *vdata;                      /* vertex shaders' vertices made one stream */
-   unsigned nbytes, maxbytes;
+   /* vertex shaders' vertices made one stream (M26), written there by
+    * gpu_vs_draw straight into GPU memory (M42: once, not copied twice
+    * more) -- chunks from the buffer cache, listed for the render and busy
+    * with it; vat the next byte in the last; nbytes all of them told */
+   struct sgx_bo *vchunk[SGX_BATCH_VCHUNKS];
+   unsigned nvchunks;
+   uint32_t vat;
+   unsigned nbytes;
    uint32_t *sa;
    unsigned nsa, maxsa;
    uint16_t *idx;
@@ -144,6 +155,13 @@ struct sgx_vtx {
    bool indexed;
    struct sgx_bo *bos[SGX_VS_MAX_ATTRIBS];
    unsigned nbos;
+   /* repacked (M42): where the stream was written -- the batch's chunk
+    * vchunk (referenced), vdata for the CPU, vdata_va for the GPU -- when
+    * the batch was number vseq (a flush since: written again, there) */
+   struct sgx_bo *vchunk;
+   uint8_t *vdata;
+   uint32_t vdata_va;
+   unsigned vseq;
 };
 
 struct sgx_context {
@@ -175,12 +193,11 @@ struct sgx_context {
    struct sgx_frame_layout layout;      /* of verts, for the bound shaders */
    float *verts;
    unsigned nverts, maxfloats;
-   /* M18: the vertex shader on the GPU -- its vertices (M26: vtx, vdata),
-    * the triangles indices into them, its uniforms */
+   /* M18: the vertex shader on the GPU -- its vertices (M26: vtx; M42: a
+    * stream the CPU makes in the batch's vertex chunks), the triangles
+    * indices into them, its uniforms */
    struct sgx_vs *gpu_vs;
    struct sgx_vtx vtx;
-   uint8_t *vdata;
-   unsigned maxvdata;
    uint16_t *indices;
    unsigned maxindices;
    uint32_t vs_sa[128 + SGX_UBUF_MAX];   /* (sa's, then the uniforms in memory, M32) */

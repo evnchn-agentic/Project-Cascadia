@@ -564,20 +564,22 @@ sgx_draw_fini(struct sgx_context *ctx)
    free(ctx->batch.dead_vs);
    free(ctx->batch.dead_fs);
    free(ctx->batch.verts);
-   free(ctx->batch.vdata);
    free(ctx->batch.sa);
    free(ctx->batch.idx);
    ctx->batch.verts = NULL;
-   ctx->batch.vdata = NULL;
    ctx->batch.sa = NULL;
    ctx->batch.idx = NULL;
+   /* (vertex chunks no draw used: the flush above had none to make) */
+   for (unsigned i = 0; i < ctx->batch.nvchunks; i++)
+      sgx_bo_destroy(ctx->batch.vchunk[i]);
+   ctx->batch.nvchunks = ctx->batch.vat = 0;
+   sgx_bo_destroy(ctx->vtx.vchunk);
+   ctx->vtx.vchunk = NULL;
    FREE(ctx->verts);
-   free(ctx->vdata);
    free(ctx->indices);
    ctx->verts = NULL;
-   ctx->vdata = NULL;
    ctx->indices = NULL;
-   ctx->nverts = ctx->maxfloats = ctx->maxvdata = ctx->maxindices = 0;
+   ctx->nverts = ctx->maxfloats = ctx->maxindices = 0;
 }
 
 /* ---- draw_vbo ----------------------------------------------------------- */
@@ -920,11 +922,14 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
       if (!bd->vs)
          d[i].verts = b->verts + bd->first;
       else if (bd->repacked)
-         d[i].vdata = b->vdata + bd->first;
+         d[i].vdata_va = bd->vdata_va;
    }
-   /* the buffers to list: the textures', then the buffers' */
+   /* the buffers to list: the textures', the buffers', the vertex chunks'
+    * (M42) */
    for (unsigned i = 0; i < b->nbos; i++)
       b->handles[b->ntex + i] = b->bos[i]->handle;
+   for (unsigned i = 0; i < b->nvchunks; i++)
+      b->handles[b->ntex + b->nbos + i] = b->vchunk[i]->handle;
    /* an occlusion query's draws among them (M37): a visibility buffer of
     * the render's, zeroed, for the query to read */
    if (b->counted && ctx->query && (vis = sgx_bo_cache_get(&screen->dev, SGX_VIS_SIZE)))
@@ -934,8 +939,8 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
       const struct sgx_frame_target t = { sgx_resource(b->rt), b->rt_level, b->rt_layer };
 
       ret = sgx_frame_render(screen->frame, &t, d, b->ndraws, b->handles,
-                             b->ntex + b->nbos, b->depth_clear, zls.bo ? &zls : NULL, vis,
-                             fence);
+                             b->ntex + b->nbos + b->nvchunks, b->depth_clear,
+                             zls.bo ? &zls : NULL, vis, fence);
       simple_mtx_unlock(&screen->frame_lock);
    }
    if (vis && !ret) {
@@ -998,6 +1003,14 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
          sgx_bo_set_busy(b->bos[i], ctx->last);
       sgx_bo_destroy(b->bos[i]);
    }
+   /* the vertex chunks back to the cache, busy with the render (a stream
+    * written for a draw not added yet keeps its chunk: sgx_vtx.vchunk) */
+   for (unsigned i = 0; i < b->nvchunks; i++) {
+      if (!ret)
+         sgx_bo_set_busy(b->vchunk[i], ctx->last);
+      sgx_bo_destroy(b->vchunk[i]);
+   }
+   b->nvchunks = b->vat = 0;
    b->ndraws = b->ntex = b->nbos = b->nfloats = b->nbytes = b->nsa = b->nidx = 0;
    b->tex_bytes = 0;
    b->seq++;
@@ -1232,6 +1245,85 @@ note_zs(struct sgx_context *ctx, const struct sgx_frame_state *st)
                  st->stencil_on;
 }
 
+/* ---- a vertex shader's stream straight into GPU memory (M42) -----------
+ *
+ * SDL's sprites are the CPU's stream: their vertices went into a buffer of
+ * the context's, then the batch's, then the render's memory -- three copies
+ * of every vertex, a sixth of SuperTux's CPU in its menu's heavy scene
+ * (memcpy-who).  gpu_vs_draw now writes the stream once, into the batch's
+ * vertex chunks (GPU memory from the buffer cache), and the render reads it
+ * there. */
+
+/* the batch's vertex chunks no render took (a flush of no draws) */
+static void
+drop_vchunks(struct sgx_batch *b)
+{
+   for (unsigned i = 0; i < b->nvchunks; i++)
+      sgx_bo_destroy(b->vchunk[i]);
+   b->nvchunks = b->vat = 0;
+}
+
+/* Room for n bytes of the stream after the batch's vertices (a new chunk
+ * when the last has none): the CPU's address to write it at, noted in
+ * ctx->vtx with its chunk referenced -- a flush before the draw is added
+ * hands that chunk to the render, and vtx_commit() copies the stream on */
+static uint8_t *
+vtx_reserve(struct sgx_context *ctx, unsigned n)
+{
+   struct sgx_screen *screen = sgx_screen(ctx->base.screen);
+   struct sgx_batch *b = &ctx->batch;
+   struct sgx_vtx *v = &ctx->vtx;
+   struct sgx_bo *bo = b->nvchunks ? b->vchunk[b->nvchunks - 1] : NULL;
+   uint32_t at = align(b->vat, 16);
+
+   if (!bo || at + n > bo->size) {
+      if (b->nvchunks == SGX_BATCH_VCHUNKS) {
+         sgx_batch_flush(ctx);
+         drop_vchunks(b);
+      }
+      if (!(bo = sgx_bo_cache_get(&screen->dev, MAX2(n, SGX_BATCH_VCHUNK))))
+         return NULL;
+      b->vchunk[b->nvchunks++] = bo;
+      at = 0;
+   }
+   sgx_bo_ref(bo);
+   sgx_bo_destroy(v->vchunk);
+   v->vchunk = bo;
+   v->vdata = bo->map + at;
+   v->vdata_va = bo->va + at;
+   v->vseq = b->seq;
+   return v->vdata;
+}
+
+/* The n bytes written at ctx->vtx's room made the batch's: their address
+ * for the GPU (0: no room).  Written for a batch flushed since, they are
+ * copied into this one's chunks first (once a render, at most). */
+static uint32_t
+vtx_commit(struct sgx_context *ctx, unsigned n)
+{
+   struct sgx_batch *b = &ctx->batch;
+   struct sgx_vtx *v = &ctx->vtx;
+
+   if (!v->vchunk)
+      return 0;
+   if (v->vseq != b->seq || !b->nvchunks || b->vchunk[b->nvchunks - 1] != v->vchunk) {
+      struct sgx_bo *old = v->vchunk;
+      const uint8_t *src = v->vdata;
+      uint8_t *dst;
+
+      sgx_bo_ref(old);
+      dst = vtx_reserve(ctx, n);
+      if (dst)
+         memcpy(dst, src, n);
+      sgx_bo_destroy(old);
+      if (!dst)
+         return 0;
+   }
+   b->vat = v->vdata_va - v->vchunk->va + n;
+   b->nbytes += n;
+   return v->vdata_va;
+}
+
 /* A vertex shader's draw (ctx->vtx) added to the last one gathered when
  * that has the same state exactly -- the same programs, uniforms (its
  * constant attributes among them), textures, layout and ISP state: SDL
@@ -1266,7 +1358,7 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
     * them (the CPU's stream), or where its attributes' addresses say --
     * the same number of vertices on for each */
    if (v->repacked) {
-      if (p->first + p->nverts * p->stride != b->nbytes)
+      if (v->vseq != b->seq || p->vdata_va + p->nverts * p->stride != v->vdata_va)
          return false;
       at = p->nverts;
    } else {
@@ -1297,8 +1389,8 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
       return false;
    }
    if (batch_bytes(b) + nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES ||
-       b->ntex + b->nbos + more_handles(ctx, NULL, 0, v->bos, v->nbos) > SGX_FRAME_MAX_HANDLES ||
-       !grow((void **)&b->vdata, &b->maxbytes, b->nbytes + nbytes, 1) ||
+       b->ntex + b->nbos + b->nvchunks + more_handles(ctx, NULL, 0, v->bos, v->nbos) >
+          SGX_FRAME_MAX_HANDLES ||
        !grow((void **)&b->idx, &b->maxidx, b->nidx + nidx, sizeof(uint16_t)))
       return false;
 
@@ -1308,9 +1400,10 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
    p->nidx += nidx;
    b->nidx += nidx;
    p->max_index = MAX2(p->max_index, at + v->max_index);
-   memcpy(b->vdata + b->nbytes, ctx->vdata, nbytes);
+   /* (right after the last draw's in its chunk: nothing to copy) */
+   if (nbytes)
+      vtx_commit(ctx, nbytes);
    p->nverts += v->repacked ? v->nverts : 0;
-   b->nbytes += nbytes;
    p->count += v->count;
    return true;
 }
@@ -1327,6 +1420,7 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
    struct sgx_vtx *v = &ctx->vtx;
    unsigned nvsa = vs->nuniforms + vs->nubuf, nidx = v->indexed ? v->count : 0;
    unsigned nbytes = v->repacked ? v->nverts * v->stride : 0, ntex = fs ? fs->nsamplers : 0;
+   uint32_t vdata_va = 0;
    struct sgx_batch_draw *bd;
 
    if (merge_vs_draw(ctx, vs, fs, sa, nsa, st)) {
@@ -1336,7 +1430,8 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
    /* room in this render: a draw, its vertices, indices, textures and
     * buffers */
    if (b->ndraws == sgx_frame_max_draws(screen->frame) ||
-       b->ntex + b->nbos + more_handles(ctx, tex, ntex, v->bos, v->nbos) > SGX_FRAME_MAX_HANDLES ||
+       b->ntex + b->nbos + b->nvchunks + 1 + more_handles(ctx, tex, ntex, v->bos, v->nbos) >
+          SGX_FRAME_MAX_HANDLES ||
        !tex_room(ctx, tex, ntex) || batch_bytes(b) + nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES) {
       sgx_batch_flush(ctx);
       if (nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES ||
@@ -1345,10 +1440,15 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
          return;
       }
    }
-   if (!grow((void **)&b->vdata, &b->maxbytes, b->nbytes + nbytes, 1) ||
-       !grow((void **)&b->sa, &b->maxsa, b->nsa + nsa + nvsa, sizeof(uint32_t)) ||
+   if (!grow((void **)&b->sa, &b->maxsa, b->nsa + nsa + nvsa, sizeof(uint32_t)) ||
        !grow((void **)&b->idx, &b->maxidx, b->nidx + nidx, sizeof(uint16_t)))
       return;
+   /* the stream where gpu_vs_draw wrote it (copied on if a flush came
+    * between: before the render's start below) */
+   if (nbytes && !(vdata_va = vtx_commit(ctx, nbytes))) {
+      mesa_logw_once("sgx: no memory for a draw's vertices: dropped");
+      return;
+   }
    if (!b->ndraws)
       batch_start(ctx, t);
    /* from now on sampled linear: decided before any draw samples it */
@@ -1358,7 +1458,7 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
 
    bd = &b->draw[b->ndraws++];
    bd->l = ctx->layout;
-   bd->first = b->nbytes;
+   bd->vdata_va = vdata_va;
    bd->nverts = v->repacked ? v->nverts : 0;
    bd->compiled = fs != NULL;
    if (fs)
@@ -1374,11 +1474,9 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
    bd->count = v->count;
    bd->max_index = v->max_index;
    bd->repacked = v->repacked;
-   memcpy(b->vdata + b->nbytes, ctx->vdata, nbytes);
    memcpy(b->sa + b->nsa, sa, nsa * sizeof(uint32_t));
    memcpy(b->sa + b->nsa + nsa, ctx->vs_sa, nvsa * sizeof(uint32_t));
    memcpy(b->idx + b->nidx, ctx->indices, nidx * sizeof(uint16_t));
-   b->nbytes += nbytes;
    b->nsa += nsa + nvsa;
    b->nidx += nidx;
 }
@@ -1900,21 +1998,6 @@ gpu_vs_can_draw(struct sgx_context *ctx, const struct pipe_draw_info *info)
    return true;
 }
 
-static bool
-grow_bytes(uint8_t **p, unsigned *max, unsigned want)
-{
-   uint8_t *q;
-
-   if (want <= *max)
-      return true;
-   want = MAX2(want, 2 * *max);
-   if (!(q = realloc(*p, want)))
-      return false;
-   *p = q;
-   *max = want;
-   return true;
-}
-
 /* One draw with the vertex shader on the GPU (M18, M26).  Its vertices
  * are fetched from the application's buffers as they are when every
  * attribute the shader reads from memory is in a format the fetch takes
@@ -1933,6 +2016,7 @@ gpu_vs_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    struct sgx_vtx *v = &ctx->vtx;
    struct sgx_screen *screen = sgx_screen(ctx->base.screen);
    const uint8_t *src[SGX_VS_MAX_ATTRIBS];
+   uint8_t *vdata = NULL;
    struct sgx_resource *res[SGX_VS_MAX_ATTRIBS];
    uint32_t off[SGX_VS_MAX_ATTRIBS];
    uint8_t attr[SGX_VS_MAX_ATTRIBS];
@@ -2104,8 +2188,8 @@ gpu_vs_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
             at += 4 * sgx_attr_words(vs->attr[a]);
          }
       v->stride = MAX2(at, 4);
-      if (n * v->stride > SGX_FRAME_MAX_BYTES ||
-          !grow_bytes(&ctx->vdata, &ctx->maxvdata, n * v->stride))
+      /* (M42: written once, into the batch's GPU memory) */
+      if (n * v->stride > SGX_FRAME_MAX_BYTES || !(vdata = vtx_reserve(ctx, n * v->stride)))
          return false;
       /* the attributes one array of the application's laid out as the
        * stream is -- SDL's x y, r g b a, u v at stride 32 (M34): the
@@ -2126,14 +2210,14 @@ gpu_vs_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
                     util_format_get_blocksize(e->src_format) == 4 * sgx_attr_words(vs->attr[a]);
          }
          if (whole && first) {
-            memcpy(ctx->vdata, first + (lo + bias) * v->stride, n * v->stride);
+            memcpy(vdata, first + (lo + bias) * v->stride, n * v->stride);
             goto copied;
          }
       }
       for (unsigned a = 0; a < vs->nattrs; a++) {
          const struct pipe_vertex_element *e = &ve->e[a];
          const uint8_t *in;
-         uint8_t *out = ctx->vdata + v->base[a];
+         uint8_t *out = vdata + v->base[a];
          unsigned size;
 
          if (SGX_ATTR_KIND(vs->attr[a]) == SGX_ATTR_CONST)

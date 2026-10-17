@@ -206,7 +206,9 @@ struct sgx_vs;
  * the pixels, vs_sa its uniforms, and its vertex fetch reads attribute n of
  * vertex i at base[n] + i x stride (M26: one stride for all) -- addresses
  * in the application's buffers, or, with vdata (nverts vertices the CPU
- * made one stream), offsets into a vertex there.  It draws count
+ * made one stream), offsets into a vertex there -- or with vdata_va, the
+ * stream already in GPU memory there (M42: the caller lists its buffer
+ * among the render's).  It draws count
  * vertices: indices[0..count) from vertex 0, or 0, 1, 2, ... without
  * (count at most sgx_frame_list_max()). */
 struct sgx_frame_draw {
@@ -219,6 +221,7 @@ struct sgx_frame_draw {
    struct sgx_vs *vs;
    const uint32_t *vs_sa;
    const uint8_t *vdata;
+   uint32_t vdata_va;
    const uint32_t *base;
    unsigned stride, count;
    const uint16_t *indices;

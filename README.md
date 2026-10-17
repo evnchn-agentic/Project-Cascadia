@@ -759,12 +759,12 @@ Build products (`output/`) and stock firmware are not tracked; everything in
   ~~a desktop~~ ✓ (XFCE) → ~~the second core~~ ✓ → ~~Wi-Fi via HSIC/EHCI~~ ✓
   → ~~the L2 cache~~ ✓ → ~~iOS's files off the NAND~~ ✓ (read-only) → NAND
   as Linux's own storage.
-- **Phase 4** — A6X (iPad 4)
-- **Phase 5 (And so on)** — Any other Apple chip for which no usable Linux port has appeared.
+- **Phase 4** — Newer chips
 
-The next in line with no particular order after the iPad mini 1/iPad 4 will likely be (Phase 5 and so on):
+The next in line with no particular order after the iPad mini 1 (Phase 4):
 - iPad 6 - A10
 - iPad Air 2 — A8X
+- iPad 4 - A6X
 - iPad mini 4 — A8
 - iPad mini 5 — A12 (requires additional hardware for booting, just like the A5)
 - iPad 9 — A13 (requires additional hardware for booting)
