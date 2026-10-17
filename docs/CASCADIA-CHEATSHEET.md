@@ -1328,6 +1328,12 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   in docker), otherwise X turns a shadow buffer (24 fps). `sgx-gl kmsrot`
   (X stopped) checks the four turns pixel by pixel. The physical screen:
   `cat /dev/fb0` (768 x 1024 BGRA) -- xwd shows the unturned one.
+- M42: who copies how much: `tools/sgx/memcpy-who.c` (build line in it;
+  `LD_PRELOAD=/root/memcpy-who.so MEMCPY_WHO_TOP=20 PROGRAM`, the report
+  at exit, library + offset for addr2line in the cascadia-mesa image, an
+  odd Thumb address minus one). A draw's vertices now go straight into the
+  render's vertex chunks in GPU memory (one copy, was three). Compare fps
+  from one boot only: SuperTux's menu dip was ~37 one boot, ~45 the next.
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.

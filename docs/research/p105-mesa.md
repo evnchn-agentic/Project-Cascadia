@@ -3034,6 +3034,63 @@ fps, every frame shown**; inverted 64-66. The desktop right in all four
 iio-sensor-proxy and a session daemon calling `rotate`; the side switch as
 the rotation lock; touch checked by hand in each turn.
 
+## M42: a draw's vertices written once, into GPU memory
+
+SuperTux's first level draws little; its main menu draws more, and at one
+moment (the menu's background scrolling past its busiest part, about 20 s
+in) the frame rate falls -- to ~37 fps one boot, ~45 the next (the same
+build, a different start: compare runs from one boot only).
+
+**Who copies.** perf's call graphs do not work here (no frame pointers;
+uprobes break Thumb code). `tools/sgx/memcpy-who.c`, an LD_PRELOAD memcpy
+and memmove that count bytes by caller (`LD_PRELOAD=/root/memcpy-who.so
+MEMCPY_WHO_TOP=N PROGRAM`; library + offset, resolved with addr2line in
+the cascadia-mesa image -- a Thumb return address is odd, one less). In 56
+s of the menu, through the dip, three callers in libgallium copied the
+same 562 MB each: SDL's client arrays (vertices in the program's memory)
+were repacked by `gpu_vs_draw` into the context's scratch stream, copied
+from it into the gathered render's stream by `add_vs_draw` (or
+`merge_vs_draw`), and from that into GPU memory by `sgx_frame_render`'s
+arena -- three copies of every vertex, ~3 KB a draw, 80-100 draws a frame.
+
+**One.** The stream is written where the GPU reads it: a gathered render
+has up to 40 vertex chunks, 256 KiB buffers from the BO cache (or one a
+draw's size), and `gpu_vs_draw` repacks a draw straight into the last
+chunk's next free bytes (`vtx_reserve`, 16-byte aligned). Gathering the
+draw (`vtx_commit`) only moves the chunk's end past it -- or, if a flush
+came between (a full render, a new chunk), copies it into the render now
+gathering, the one case of a second copy. A draw merged into the last one
+needs its vertices to follow the last one's in the same chunk (they do,
+written one after another). `sgx_frame_render` takes a draw with
+`vdata_va` as already placed (no arena copy) and the chunks' handles come
+after the buffers' in the render's list (256 at most, counted with the
+rest); after the render the chunks are marked busy with its fence and
+given back to the cache. The context's scratch stream and the batch's are
+gone.
+
+Measured (the same boot, SuperTux 0.6.3 in its menu, landscape, under X):
+
+| | before | after |
+|---|---|---|
+| copies in 56 s, all callers | 2042 MB | 940 MB |
+| the vertices' copies | 3 x 562 MB | 1 x 559 MB |
+| CPU before the dip | 71% | 65% |
+| CPU in the dip | 84-86% | 75-77% |
+| fps in the dip | 44.9-46.9 | 46.1-48.0 |
+
+What is left of the dip is the GPU's: `SGX_DEBUG=fps,sync` (each render
+waited for) shows 11-12 ms of GPU a render before it and **16 ms** in it.
+The rest of the copies are SDL's: libSDL2 itself (`+0x5e4d0`, 30 million
+copies of 4 bytes -- per vertex, unresolved: Alpine's SDL2 has no debug
+package) and SDL_image's loading.
+
+Checked: the regression programs (glclear, gltri, glfs, gltex, glblend,
+gldepth, glcull, gldiscard, glstencil, glwrap, glvtx, glmip, glvary,
+glldr, glflow, glfetch, gldesk, glupload, gloffset, glproj) all pass;
+glspeed's sprites 25.3 ms a frame (GPU-bound, as before); dEQP's
+vertex_arrays, draw, buffer, attribute_location, default_vertex_attrib,
+clipping and rasterization groups as in M38.
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the
