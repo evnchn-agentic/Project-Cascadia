@@ -337,11 +337,15 @@ sgx_clear(struct pipe_context *pctx, unsigned buffers, uint32_t color_clear_mask
    bool cd = (buffers & PIPE_CLEAR_DEPTH) && zs;
    bool cs = (buffers & PIPE_CLEAR_STENCIL) && zs &&
              util_format_has_stencil(util_format_description(zs->format));
+   /* (a framebuffer smaller than its depth buffer, M43: only the area they
+    * share is cleared -- a quad, not the render's start for all of it) */
+   bool zs_whole = zs && ctx->fb.width >= u_minify(zs->width0, ctx->fb.zsbuf.level) &&
+                   ctx->fb.height >= u_minify(zs->height0, ctx->fb.zsbuf.level);
 
    /* depth and stencil first (the colour's quad would end a render's
     * start): at a render's start, all of the target, the depth the render
     * starts at and its stencil 0 for free; else a quad in the render (M24) */
-   if ((cd || cs) && !ctx->batch.ndraws && !scissor) {
+   if ((cd || cs) && !ctx->batch.ndraws && !scissor && zs_whole) {
       if (cd) {
          ctx->batch.depth_clear = depth;
          ctx->batch.zs_cleared = true;
@@ -364,6 +368,8 @@ sgx_clear(struct pipe_context *pctx, unsigned buffers, uint32_t color_clear_mask
       /* else the render ends (what was drawn comes first) */
       sgx_batch_flush(ctx);
       if (!scissor && ((color_clear_mask >> (4 * i)) & 0xf) == 0xf &&
+          ctx->fb.width >= u_minify(surf->texture->width0, surf->level) &&
+          ctx->fb.height >= u_minify(surf->texture->height0, surf->level) &&
           sgx_clear_gpu(ctx, surf, color))
          continue;
       util_clear_render_target(pctx, surf, color, x, y, w, h);
@@ -394,122 +400,178 @@ sgx_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
 /* ---- copies and blits, by the CPU --------------------------------------- */
 
 /* A blit the copy cannot do -- another format, a scale, a flip -- by the
- * CPU, a texel at a time through util_format's floats, nearest (glCopyTex
- * Image's from a B8G8R8A8 target into an RGB texture, say: M28) */
+ * CPU, a texel at a time through util_format's floats (glCopyTexImage's
+ * from a B8G8R8A8 target into an RGB texture, say: M28).  As
+ * glBlitFramebuffer wants it (M43): each destination pixel's centre taken
+ * back into the source, nearest or between the four texels around it
+ * (clamped to the source's edges), none written whose centre falls outside
+ * the source or the scissor; depth and stencil nearest; blended with the
+ * source's alpha when asked.  Colour, or depth and stencil, at a time. */
 static bool
 cpu_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
    const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   struct pipe_resource *sres = info->src.resource, *dres = info->dst.resource;
+   bool zs = info->mask & PIPE_MASK_ZS;
+   bool linear = !zs && info->filter == PIPE_TEX_FILTER_LINEAR;
+   int sw = u_minify(sres->width0, info->src.level), sh = u_minify(sres->height0, info->src.level);
+   int dw = u_minify(dres->width0, info->dst.level), dh = u_minify(dres->height0, info->dst.level);
+   int x0 = MAX2(MIN2(db->x, db->x + db->width), 0), x1 = MIN2(MAX2(db->x, db->x + db->width), dw);
+   int y0 = MAX2(MIN2(db->y, db->y + db->height), 0), y1 = MIN2(MAX2(db->y, db->y + db->height), dh);
    struct pipe_transfer *st, *dt;
-   struct pipe_box sbox = *sb, dbox = *db;
+   struct pipe_box sbox, dbox;
    const uint8_t *src;
    uint8_t *dst;
-   float *in, *out;
-   int sw = abs(sb->width), sh = abs(sb->height), dw = abs(db->width), dh = abs(db->height);
+   float *in0, *in1, *out;
+   uint8_t *s8, *d8;
+   bool ok;
 
-   bool zs = info->mask & PIPE_MASK_ZS;
-
-   /* colour, or depth and stencil (M35: their maps go through the ISP's
-    * tiles) -- not both */
    if (!info->mask || (zs && (info->mask & PIPE_MASK_RGBA)) ||
        (zs && (!util_format_is_depth_or_stencil(info->src.format) ||
                !util_format_is_depth_or_stencil(info->dst.format))) ||
        (!zs && (util_format_is_depth_or_stencil(info->src.format) ||
                 util_format_is_depth_or_stencil(info->dst.format))))
       return false;
-   if (util_format_is_compressed(info->dst.format) || info->scissor_enable ||
-       info->alpha_blend || sb->depth != 1 || db->depth != 1 || !sw || !sh || !dw || !dh)
+   if (util_format_is_compressed(info->dst.format) || util_format_is_compressed(info->src.format) ||
+       sb->depth != 1 || db->depth != 1 || !sb->width || !sb->height || !db->width ||
+       !db->height)
       return false;
-   /* the boxes as maps take them: x, y their least corner */
-   if (sb->width < 0) {
-      sbox.x += sb->width;
-      sbox.width = -sb->width;
+   if (info->scissor_enable) {
+      x0 = MAX2(x0, (int)info->scissor.minx);
+      x1 = MIN2(x1, (int)info->scissor.maxx);
+      y0 = MAX2(y0, (int)info->scissor.miny);
+      y1 = MIN2(y1, (int)info->scissor.maxy);
    }
-   if (sb->height < 0) {
-      sbox.y += sb->height;
-      sbox.height = -sb->height;
-   }
-   if (db->width < 0) {
-      dbox.x += db->width;
-      dbox.width = -db->width;
-   }
-   if (db->height < 0) {
-      dbox.y += db->height;
-      dbox.height = -db->height;
-   }
-   src = pctx->texture_map(pctx, info->src.resource, info->src.level, PIPE_MAP_READ, &sbox, &st);
+   if (x0 >= x1 || y0 >= y1)
+      return true;
+
+   /* the source's whole level (a box may reach past it), the destination's
+    * pixels to write, read too (what is not written stays) */
+   u_box_2d_zslice(0, 0, sb->z, sw, sh, &sbox);
+   u_box_2d_zslice(x0, y0, db->z, x1 - x0, y1 - y0, &dbox);
+   src = pctx->texture_map(pctx, sres, info->src.level, PIPE_MAP_READ, &sbox, &st);
    if (!src)
       return false;
-   dst = pctx->texture_map(pctx, info->dst.resource, info->dst.level, PIPE_MAP_WRITE, &dbox,
-                           &dt);
+   dst = pctx->texture_map(pctx, dres, info->dst.level, PIPE_MAP_READ_WRITE, &dbox, &dt);
    if (!dst) {
       pctx->texture_unmap(pctx, st);
       return false;
    }
-   in = MALLOC(4 * sw * sizeof(float));
-   out = MALLOC(4 * dw * sizeof(float));
-   for (int y = 0; zs && in && out && y < dh; y++) {
-      /* depth as floats, stencil as bytes (in the same rows) */
-      int dy = db->height < 0 ? dh - 1 - y : y;
-      int sy = (int)(((float)y + 0.5f) * sh / dh);
-      uint8_t *drow = dst + dy * dt->stride, *sst = (uint8_t *)(in + sw),
-              *dst8 = (uint8_t *)(out + dw);
+   in0 = MALLOC(4 * sw * sizeof(float));
+   in1 = MALLOC(4 * sw * sizeof(float));
+   out = MALLOC(4 * (x1 - x0) * sizeof(float));
+   s8 = MALLOC(sw);
+   d8 = MALLOC(x1 - x0);
+   ok = in0 && in1 && out && s8 && d8;
+   for (int y = y0; ok && y < y1; y++) {
+      /* the destination row's centre in the source, and its rows */
+      float fy = sb->y + (y + 0.5f - db->y) * sb->height / (float)db->height;
+      uint8_t *drow = dst + (y - y0) * dt->stride;
+      int r0, r1;
+      float wy = 0;
 
-      sy = sb->height < 0 ? sh - 1 - sy : sy;
-      if (info->mask & PIPE_MASK_Z)
-         util_format_unpack_z_float(info->src.format, in, src + sy * st->stride, sw);
-      if (info->mask & PIPE_MASK_S)
-         util_format_unpack_s_8uint(info->src.format, sst, src + sy * st->stride, sw);
-      for (int x = 0; x < dw; x++) {
-         int dx = db->width < 0 ? dw - 1 - x : x;
-         int sx = (int)(((float)x + 0.5f) * sw / dw);
-
-         sx = sb->width < 0 ? sw - 1 - sx : sx;
-         out[dx] = in[sx];
-         dst8[dx] = sst[sx];
+      if (fy < 0 || fy >= sh)
+         continue;
+      if (linear) {
+         r0 = (int)floorf(fy - 0.5f);
+         wy = fy - 0.5f - r0;
+         r1 = CLAMP(r0 + 1, 0, sh - 1);
+         r0 = CLAMP(r0, 0, sh - 1);
+      } else {
+         r0 = r1 = (int)fy;
       }
-      if ((info->mask & PIPE_MASK_Z) && util_format_has_depth(util_format_description(info->dst.format)))
-         util_format_pack_z_float(info->dst.format, drow, out, dw);
-      if ((info->mask & PIPE_MASK_S) &&
-          util_format_has_stencil(util_format_description(info->dst.format)))
-         util_format_pack_s_8uint(info->dst.format, drow, dst8, dw);
-   }
-   for (int y = 0; !zs && in && out && y < dh; y++) {
-      /* the destination's row y (counted the way its box goes) from the
-       * source's nearest */
-      int dy = db->height < 0 ? dh - 1 - y : y;
-      int sy = (int)(((float)y + 0.5f) * sh / dh);
-      uint8_t *drow = dst + dy * dt->stride;
-
-      sy = sb->height < 0 ? sh - 1 - sy : sy;
-      util_format_unpack_rgba(info->src.format, in, src + sy * st->stride, sw);
-      if (info->mask != PIPE_MASK_RGBA)
-         util_format_unpack_rgba(info->dst.format, out, drow, dw);
-      for (int x = 0; x < dw; x++) {
-         int dx = db->width < 0 ? dw - 1 - x : x;
-         int sx = (int)(((float)x + 0.5f) * sw / dw);
-
-         sx = sb->width < 0 ? sw - 1 - sx : sx;
-         for (unsigned c = 0; c < 4; c++)
-            if (info->mask & (PIPE_MASK_R << c))
-               out[4 * dx + c] = in[4 * sx + c];
+      if (zs) {
+         if (info->mask & PIPE_MASK_Z) {
+            util_format_unpack_z_float(info->src.format, in0, src + r0 * st->stride, sw);
+            util_format_unpack_z_float(info->dst.format, out, drow, x1 - x0);
+         }
+         if (info->mask & PIPE_MASK_S) {
+            util_format_unpack_s_8uint(info->src.format, s8, src + r0 * st->stride, sw);
+            util_format_unpack_s_8uint(info->dst.format, d8, drow, x1 - x0);
+         }
+      } else {
+         util_format_unpack_rgba(info->src.format, in0, src + r0 * st->stride, sw);
+         if (linear)
+            util_format_unpack_rgba(info->src.format, in1, src + r1 * st->stride, sw);
+         util_format_unpack_rgba(info->dst.format, out, drow, x1 - x0);
       }
-      util_format_pack_rgba(info->dst.format, drow, out, dw);
+      for (int x = x0; x < x1; x++) {
+         float fx = sb->x + (x + 0.5f - db->x) * sb->width / (float)db->width;
+         float *o = out + 4 * (x - x0), texel[4];
+         int c0, c1;
+
+         if (fx < 0 || fx >= sw)
+            continue;
+         if (zs) {
+            c0 = (int)fx;
+            if (info->mask & PIPE_MASK_Z)
+               out[x - x0] = in0[c0];
+            if (info->mask & PIPE_MASK_S)
+               d8[x - x0] = s8[c0];
+            continue;
+         }
+         if (linear) {
+            float wx;
+
+            c0 = (int)floorf(fx - 0.5f);
+            wx = fx - 0.5f - c0;
+            c1 = CLAMP(c0 + 1, 0, sw - 1);
+            c0 = CLAMP(c0, 0, sw - 1);
+            for (unsigned c = 0; c < 4; c++) {
+               float t = in0[4 * c0 + c] + (in0[4 * c1 + c] - in0[4 * c0 + c]) * wx;
+               float b = in1[4 * c0 + c] + (in1[4 * c1 + c] - in1[4 * c0 + c]) * wx;
+
+               texel[c] = t + (b - t) * wy;
+            }
+         } else {
+            memcpy(texel, in0 + 4 * (int)fx, sizeof(texel));
+         }
+         for (unsigned c = 0; c < 4; c++) {
+            if (!(info->mask & (PIPE_MASK_R << c)))
+               continue;
+            o[c] = info->alpha_blend ? texel[c] * texel[3] + o[c] * (1 - texel[3]) : texel[c];
+         }
+      }
+      if (zs) {
+         if ((info->mask & PIPE_MASK_Z) &&
+             util_format_has_depth(util_format_description(info->dst.format)))
+            util_format_pack_z_float(info->dst.format, drow, out, x1 - x0);
+         if ((info->mask & PIPE_MASK_S) &&
+             util_format_has_stencil(util_format_description(info->dst.format)))
+            util_format_pack_s_8uint(info->dst.format, drow, d8, x1 - x0);
+      } else {
+         util_format_pack_rgba(info->dst.format, drow, out, x1 - x0);
+      }
    }
-   FREE(in);
+   FREE(in0);
+   FREE(in1);
    FREE(out);
+   FREE(s8);
+   FREE(d8);
    pctx->texture_unmap(pctx, dt);
    pctx->texture_unmap(pctx, st);
-   return true;
+   return ok;
 }
 
 static void
 sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
-   if (util_try_blit_via_copy_region(pctx, info, false) || cpu_blit(pctx, info))
+   struct pipe_blit_info part = *info;
+
+   if (util_try_blit_via_copy_region(pctx, info, false))
       return;
-   mesa_logw_once("sgx: a blit scissored or blended, or of colour and depth at once: not "
-                  "done yet");
+   /* colour, then depth and stencil (M43: glBlitFramebuffer's mask may
+    * have both) */
+   part.mask = info->mask & PIPE_MASK_RGBA;
+   if (part.mask && !cpu_blit(pctx, &part))
+      mesa_logw_once("sgx: a colour blit not done (format %s to %s)",
+                     util_format_short_name(info->src.format),
+                     util_format_short_name(info->dst.format));
+   part.mask = info->mask & PIPE_MASK_ZS;
+   if (part.mask && !cpu_blit(pctx, &part))
+      mesa_logw_once("sgx: a depth or stencil blit not done (format %s to %s)",
+                     util_format_short_name(info->src.format),
+                     util_format_short_name(info->dst.format));
 }
 
 static void

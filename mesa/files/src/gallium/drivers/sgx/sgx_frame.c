@@ -1267,10 +1267,11 @@ static struct sgx_eot
 target_eot(const struct sgx_frame_target *t)
 {
    const struct sgx_resource *r = t->res;
+   unsigned w = u_minify(r->base.width0, t->level), h = u_minify(r->base.height0, t->level);
 
    return (struct sgx_eot){
       .va = r->bo->va + r->offset[t->level] + t->layer * r->layer_size[t->level],
-      .w = u_minify(r->base.width0, t->level), .h = u_minify(r->base.height0, t->level),
+      .w = t->w ? MIN2(t->w, w) : w, .h = t->h ? MIN2(t->h, h) : h,
       .stride = r->stride[t->level],
    };
 }

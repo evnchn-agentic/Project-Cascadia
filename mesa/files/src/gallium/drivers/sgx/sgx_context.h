@@ -90,12 +90,14 @@ void sgx_query_add(struct sgx_query *q, struct sgx_bo *bo);
 struct sgx_batch {
    struct pipe_resource *rt;            /* referenced */
    unsigned rt_level, rt_layer;         /* its level and face (M29) */
+   unsigned w, h;                       /* its area (M43: sgx_frame_target) */
    struct sgx_batch_draw draw[SGX_FRAME_MAX_DRAWS];
    struct sgx_frame_draw fdraw[SGX_FRAME_MAX_DRAWS];    /* (sgx_batch_flush's) */
    unsigned ndraws;
    unsigned seq;                        /* this one's number, counted from 1 */
    float depth_clear;                   /* what the render's depth starts at */
    struct pipe_resource *zs;            /* the depth buffer, referenced (M24) */
+   unsigned zs_level, zs_layer;         /* its level and layer (M43) */
    bool zs_cleared;                     /* its depth cleared at the render's start */
    bool zs_read, zs_written;            /* a draw tests depth, writes it */
    bool counted;                        /* a draw's samples counted (M37) */

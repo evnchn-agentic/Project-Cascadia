@@ -50,10 +50,13 @@ struct sgx_frame *sgx_frame_create(struct sgx_device *dev, const char *packdir);
 void sgx_frame_destroy(struct sgx_frame *f);
 
 /* A render's target: a level and a layer (a cube map's face) of a
- * resource (M29) */
+ * resource (M29), and the render's area from its top left when not all of
+ * it (w, h; 0: the level's) -- a framebuffer whose attachments differ in
+ * size renders over what they have in common (M43) */
 struct sgx_frame_target {
    struct sgx_resource *res;
    unsigned level, layer;
+   unsigned w, h;
 };
 
 /* Whether a render through the frame can fill this surface: B8G8R8A8 or

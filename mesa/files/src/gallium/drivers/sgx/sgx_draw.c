@@ -626,6 +626,8 @@ fs_for_draw(struct sgx_context *ctx)
 
       if (unit < 8 && view && util_format_is_srgb(view->format))
          key.tex_srgb |= 1u << unit;
+      if (unit < 8 && view && sgx_resource_copy_f16(view->texture))
+         key.tex_f16 |= 1u << unit;
       if (unit < 8 && view && util_format_is_depth_or_stencil(view->texture->format)) {
          const struct pipe_sampler_state *ss = unit < PIPE_MAX_SAMPLERS ?
                                                ctx->fs_samplers[unit] : NULL;
@@ -639,6 +641,15 @@ fs_for_draw(struct sgx_context *ctx)
             key.tex_shadow |= 1u << unit;
             key.shadow_func[unit] = ss->compare_func;
          }
+      } else if (unit < 8 && view &&
+                 (view->swizzle_r != PIPE_SWIZZLE_X || view->swizzle_g != PIPE_SWIZZLE_Y ||
+                  view->swizzle_b != PIPE_SWIZZLE_Z || view->swizzle_a != PIPE_SWIZZLE_W)) {
+         /* a view's swizzle (M43): the program's, on the texel */
+         key.tex_swz |= 1u << unit;
+         key.tex_swizzle[unit][0] = view->swizzle_r;
+         key.tex_swizzle[unit][1] = view->swizzle_g;
+         key.tex_swizzle[unit][2] = view->swizzle_b;
+         key.tex_swizzle[unit][3] = view->swizzle_a;
       }
    }
    /* gl_FrontFacing: which winding is the front */
@@ -646,7 +657,7 @@ fs_for_draw(struct sgx_context *ctx)
        BITSET_TEST(sh->nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE))
       key.front_ccw = 1;
    if (!key.enable && key.colormask == 0xf && !key.tex_swap && !key.tex_x8 && !key.tex_srgb &&
-       !key.front_ccw && !key.logicop && !key.tex_depth)
+       !key.front_ccw && !key.logicop && !key.tex_depth && !key.tex_swz && !key.tex_f16)
       return sh->compiled;
    /* (the key is bytes, no padding) */
    for (unsigned i = 0; i < sh->nvariants; i++)
@@ -902,12 +913,26 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
    struct sgx_batch *b = &ctx->batch;
    struct sgx_frame_draw *d = b->fdraw;
    struct sgx_resource *zs = b->zs ? sgx_resource(b->zs) : NULL;
+   struct sgx_zls *zt = zs ? sgx_resource_zls(zs, b->zs_level, b->zs_layer) : NULL;
    struct sgx_frame_zls zls = { 0 };
    struct sgx_bo *vis = NULL;
    struct sgx_fence *fence;
    int ret = -ENOMEM;
 
    if (!b->ndraws) {
+      /* a depth clear no draw came after: the depth buffer's own, noted
+       * for the next render of it or a map (M43: a level cleared, then
+       * the framebuffer changed to the next -- the clear was lost) */
+      if (b->zs_cleared && ctx->fb.zsbuf.texture) {
+         struct sgx_zls *z = sgx_resource_zls(sgx_resource(ctx->fb.zsbuf.texture),
+                                              ctx->fb.zsbuf.level, ctx->fb.zsbuf.first_layer);
+
+         if (z) {
+            z->cleared = true;
+            z->clear = b->depth_clear;
+         }
+         b->zs_cleared = false;
+      }
       bury(ctx);
       return;
    }
@@ -915,32 +940,33 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
     * when a draw (or a clear's quad) writes depth, loaded at its start when
     * there is something there, no clear came first and a draw reads or
     * writes depth.  SGX_ZLS=0: never (depth lives in the tiles only) */
-   if (zs && b->zs->width0 && debug_get_bool_option("SGX_ZLS", true)) {
+   if (zt && b->zs->width0 && debug_get_bool_option("SGX_ZLS", true)) {
+      unsigned zw = u_minify(b->zs->width0, b->zs_level), zh = u_minify(b->zs->height0, b->zs_level);
       bool store, load;
 
       /* a clear no draw used is only noted: the next render starts from
        * it instead of loading */
-      if (zs->zls_cleared && !b->zs_cleared) {
+      if (zt->cleared && !b->zs_cleared) {
          b->zs_cleared = true;
-         b->depth_clear = zs->zls_clear;
+         b->depth_clear = zt->clear;
       }
-      zs->zls_cleared = false;
+      zt->cleared = false;
       store = b->zs_written;
-      load = zs->zls_valid && !b->zs_cleared && (store || b->zs_read);
+      load = zt->valid && !b->zs_cleared && (store || b->zs_read);
       if (b->zs_cleared && !store) {
-         zs->zls_cleared = true;
-         zs->zls_clear = b->depth_clear;
+         zt->cleared = true;
+         zt->clear = b->depth_clear;
       }
 
-      if ((load || store) && !zs->zls) {
-         zs->zls = sgx_bo_create(&screen->dev, sgx_frame_zls_size(b->zs->width0,
-                                                                  b->zs->height0), 0, 0);
-         zs->zls_valid = false;
+      /* (the level's own, M43) */
+      if ((load || store) && !zt->bo) {
+         zt->bo = sgx_bo_create(&screen->dev, sgx_frame_zls_size(zw, zh), 0, 0);
+         zt->valid = false;
          load = false;
       }
-      if ((load || store) && zs->zls) {
-         zls.bo = zs->zls;
-         zls.w = b->zs->width0;
+      if ((load || store) && zt->bo) {
+         zls.bo = zt->bo;
+         zls.w = zw;
          zls.load = load;
          zls.store = store;
          zls.stencil = util_format_has_stencil(util_format_description(b->zs->format));
@@ -981,7 +1007,8 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
       memset(vis->map, 0, SGX_VIS_SIZE);
    if ((fence = sgx_fence_create(&screen->dev, false))) {
       simple_mtx_lock(&screen->frame_lock);
-      const struct sgx_frame_target t = { sgx_resource(b->rt), b->rt_level, b->rt_layer };
+      const struct sgx_frame_target t = { sgx_resource(b->rt), b->rt_level, b->rt_layer,
+                                          b->w, b->h };
 
       ret = sgx_frame_render(screen->frame, &t, d, b->ndraws, b->handles,
                              b->ntex + b->nbos + b->nvchunks, b->depth_clear,
@@ -1025,7 +1052,7 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
       sgx_resource(b->rt)->seq++;
       sgx_resource(b->rt)->gpu_written = true;
       if (zls.store) {
-         zs->zls_valid = true;
+         zt->valid = true;
          zs->seq++;           /* (a depth texture's copy made again, M37) */
       }
    } else {
@@ -1133,7 +1160,8 @@ fb_target(struct sgx_context *ctx, struct sgx_frame_target *t)
    struct pipe_resource *zs = ctx->fb.zsbuf.texture;
 
    if (ctx->fb.nr_cbufs >= 1 && surf->texture) {
-      *t = (struct sgx_frame_target){ sgx_resource(surf->texture), surf->level, surf->first_layer };
+      *t = (struct sgx_frame_target){ sgx_resource(surf->texture), surf->level,
+                                      surf->first_layer, ctx->fb.width, ctx->fb.height };
       return true;
    }
    /* depth and stencil alone (a shadow map, M35): the render still ends
@@ -1155,7 +1183,8 @@ fb_target(struct sgx_context *ctx, struct sgx_frame_target *t)
       if (!ctx->no_colour)
          return false;
    }
-   *t = (struct sgx_frame_target){ sgx_resource(ctx->no_colour), 0, 0 };
+   *t = (struct sgx_frame_target){ sgx_resource(ctx->no_colour), 0, 0, ctx->fb.width,
+                                   ctx->fb.height };
    return true;
 }
 
@@ -1164,7 +1193,7 @@ static bool
 batch_elsewhere(const struct sgx_batch *b, const struct sgx_frame_target *t)
 {
    return b->ndraws && (b->rt != &t->res->base || b->rt_level != t->level ||
-                        b->rt_layer != t->layer);
+                        b->rt_layer != t->layer || b->w != t->w || b->h != t->h);
 }
 
 /* the gathered render's target and depth buffer, at its first draw */
@@ -1176,7 +1205,11 @@ batch_start(struct sgx_context *ctx, const struct sgx_frame_target *t)
    pipe_resource_reference(&b->rt, &t->res->base);
    b->rt_level = t->level;
    b->rt_layer = t->layer;
+   b->w = t->w;
+   b->h = t->h;
    pipe_resource_reference(&b->zs, ctx->fb.zsbuf.texture);
+   b->zs_level = ctx->fb.zsbuf.level;
+   b->zs_layer = ctx->fb.zsbuf.first_layer;
 }
 
 /* the vertices and indices gathered, in bytes (SGX_FRAME_MAX_BYTES) */

@@ -44,6 +44,13 @@ struct sgx_blend_key {
    uint8_t tex_depth, tex_shadow;
    uint8_t shadow_func[8];
    uint8_t depth_swizzle[8][4];
+   /* (M43) the other units whose view swizzles the texel (EXT_texture_swizzle,
+    * GL 3.3): pipe_swizzle each, after the texture unit's own order */
+   uint8_t tex_swz;
+   uint8_t tex_swizzle[8][4];
+   /* (M43) the units whose copy is half floats (sgx_resource_copy_f16):
+    * sampled as F32, not as bytes; not by the PDS */
+   uint8_t tex_f16;
 };
 
 #define SGX_FS_MAX_SAMPLERS 8

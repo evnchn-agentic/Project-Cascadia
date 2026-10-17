@@ -55,10 +55,11 @@ struct sgx_resource {
    struct sgx_bo *sampled;                        /* what the last state words point at */
    bool external;                                 /* shared: others may write it */
    bool gpu_written;                              /* a render has written it */
-   struct sgx_bo *zls;                            /* a depth buffer's tiles (M24) */
-   bool zls_valid;                                /* a render has stored them */
-   bool zls_cleared;                              /* cleared since, to zls_clear */
-   float zls_clear;
+   /* a depth buffer's tiles (M24), each level's face or layer its own
+    * (M43: a depth texture's levels rendered to), level * array_size +
+    * layer; made at their first use */
+   struct sgx_zls *zls;
+   unsigned nzls;
 };
 
 static inline struct sgx_resource *
@@ -66,6 +67,22 @@ sgx_resource(struct pipe_resource *p)
 {
    return (struct sgx_resource *)p;
 }
+
+/* The ISP's tiles of one level and layer of a depth buffer, as a render
+ * stores them (M24) */
+struct sgx_zls {
+   struct sgx_bo *bo;
+   bool valid;                                    /* a render has stored them */
+   bool cleared;                                  /* cleared since, to clear */
+   float clear;
+};
+
+/* a level's layer's tiles (state made the first time, the buffer not), or
+ * NULL when there is no memory for the state */
+struct sgx_zls *sgx_resource_zls(struct sgx_resource *res, unsigned level, unsigned layer);
+
+/* whether p's copy for the sampler is four half floats (M43) */
+bool sgx_resource_copy_f16(const struct pipe_resource *p);
 
 struct sgx_transfer {
    struct pipe_transfer base;

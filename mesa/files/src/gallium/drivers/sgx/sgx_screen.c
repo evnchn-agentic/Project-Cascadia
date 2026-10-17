@@ -113,7 +113,12 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    default:
       return false;
    }
-   if (!desc || desc->layout != UTIL_FORMAT_LAYOUT_PLAIN)
+   /* (the packed float and shared exponent formats: sampled, as half
+    * floats, M43) */
+   if (!desc || (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
+                 !((usage & ~PIPE_BIND_SAMPLER_VIEW) == 0 &&
+                   (format == PIPE_FORMAT_R11G11B10_FLOAT ||
+                    format == PIPE_FORMAT_R9G9B9E5_FLOAT))))
       return false;
 
    /* what the pixel back end writes linear (the framebuffer's format) */
@@ -147,6 +152,36 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       case PIPE_FORMAT_B8G8R8X8_SRGB:
       case PIPE_FORMAT_L8_SRGB:
       case PIPE_FORMAT_L8A8_SRGB:
+      /* (M43) copied as half floats (sgx_resource_copy_f16): float,
+       * signed, 16-bit and the packed formats -- ARB_texture_float,
+       * EXT_texture_snorm, EXT_packed_float, EXT_texture_shared_exponent */
+      case PIPE_FORMAT_R16_FLOAT: case PIPE_FORMAT_R16G16_FLOAT:
+      case PIPE_FORMAT_R16G16B16_FLOAT: case PIPE_FORMAT_R16G16B16A16_FLOAT:
+      case PIPE_FORMAT_R16G16B16X16_FLOAT:
+      case PIPE_FORMAT_A16_FLOAT: case PIPE_FORMAT_L16_FLOAT: case PIPE_FORMAT_L16A16_FLOAT:
+      case PIPE_FORMAT_I16_FLOAT:
+      case PIPE_FORMAT_R32_FLOAT: case PIPE_FORMAT_R32G32_FLOAT:
+      case PIPE_FORMAT_R32G32B32_FLOAT: case PIPE_FORMAT_R32G32B32A32_FLOAT:
+      case PIPE_FORMAT_R32G32B32X32_FLOAT:
+      case PIPE_FORMAT_A32_FLOAT: case PIPE_FORMAT_L32_FLOAT: case PIPE_FORMAT_L32A32_FLOAT:
+      case PIPE_FORMAT_I32_FLOAT:
+      case PIPE_FORMAT_R8_SNORM: case PIPE_FORMAT_R8G8_SNORM: case PIPE_FORMAT_R8G8B8A8_SNORM:
+      case PIPE_FORMAT_R8G8B8X8_SNORM:
+      case PIPE_FORMAT_A8_SNORM: case PIPE_FORMAT_L8_SNORM: case PIPE_FORMAT_L8A8_SNORM:
+      case PIPE_FORMAT_I8_SNORM:
+      case PIPE_FORMAT_R16_SNORM: case PIPE_FORMAT_R16G16_SNORM:
+      case PIPE_FORMAT_R16G16B16A16_SNORM: case PIPE_FORMAT_R16G16B16X16_SNORM:
+      case PIPE_FORMAT_A16_SNORM: case PIPE_FORMAT_L16_SNORM: case PIPE_FORMAT_L16A16_SNORM:
+      case PIPE_FORMAT_I16_SNORM:
+      case PIPE_FORMAT_R16_UNORM: case PIPE_FORMAT_R16G16_UNORM:
+      case PIPE_FORMAT_R16G16B16A16_UNORM: case PIPE_FORMAT_R16G16B16X16_UNORM:
+      case PIPE_FORMAT_A16_UNORM: case PIPE_FORMAT_L16_UNORM: case PIPE_FORMAT_L16A16_UNORM:
+      case PIPE_FORMAT_I16_UNORM:
+      case PIPE_FORMAT_R10G10B10A2_UNORM: case PIPE_FORMAT_B10G10R10A2_UNORM:
+      case PIPE_FORMAT_R10G10B10X2_UNORM: case PIPE_FORMAT_B10G10R10X2_UNORM:
+      case PIPE_FORMAT_R11G11B10_FLOAT: case PIPE_FORMAT_R9G9B9E5_FLOAT:
+      /* (and R and RG of bytes, RGBA8's copy: ARB_texture_rg's sampling) */
+      case PIPE_FORMAT_R8_UNORM: case PIPE_FORMAT_R8G8_UNORM:
       /* depth (GLES 2 has OES_depth_texture whatever the driver says): its
        * copy grey, 8 bits of it (sgx_resource.c) */
       case PIPE_FORMAT_Z16_UNORM:
@@ -231,6 +266,12 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    caps->blend_equation_separate = true;
    caps->uma = true;
    caps->max_render_targets = 1;
+   /* attachments of different sizes: a render over their common area, the
+    * depth buffer's tiles by its own size (M43: ARB_framebuffer_object) */
+   caps->mixed_framebuffer_sizes = true;
+   /* a view's swizzle: the program's, after the lookup (M43:
+    * EXT_texture_swizzle; sgx_blend_key's tex_swizzle) */
+   caps->texture_swizzle = true;
    caps->max_texture_2d_size = 4096;      /* iOS's on the A5; SGX_RT_MAX_SIZE */
    caps->max_texture_cube_levels = 12;
    caps->max_texture_3d_levels = 0;

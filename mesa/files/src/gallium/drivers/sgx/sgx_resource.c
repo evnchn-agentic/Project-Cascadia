@@ -18,6 +18,7 @@
 #include "drm-uapi/drm_fourcc.h"
 #include "frontend/winsys_handle.h"
 #include "util/format/u_format.h"
+#include "util/half_float.h"
 #include "util/log.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
@@ -106,7 +107,9 @@ sgx_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *prsc)
    /* a render still using it holds the kernel's reference */
    sgx_bo_destroy(res->tw);
    FREE(res->tw_cpu);
-   sgx_bo_destroy(res->zls);
+   for (unsigned i = 0; i < res->nzls; i++)
+      sgx_bo_destroy(res->zls[i].bo);
+   FREE(res->zls);
    sgx_bo_destroy(res->bo);
    if (res->data)
       simple_mtx_destroy(&res->dirty_lock);
@@ -305,14 +308,53 @@ native_format(const struct pipe_resource *p, uint32_t *fmt, uint32_t *swizzle)
    }
 }
 
-/* the texel bytes of res's copy: its own, or RGBA8's */
+/* Whether a format the sampler has not is copied as four half floats
+ * (GXM's F16F16F16F16, 0x1b, which it filters) instead of RGBA8 (M43):
+ * floats, signed and wider than 8-bit channels, the packed float and shared
+ * exponent formats -- ARB_texture_float, EXT_texture_snorm and the rest of
+ * GL 3.0's.  Its texels come back F32 (sgx_blend_key's tex_f16). */
+bool
+sgx_resource_copy_f16(const struct pipe_resource *p)
+{
+   const struct util_format_description *desc = util_format_description(p->format);
+   uint32_t fmt, swizzle;
+
+   if (!desc || util_format_is_depth_or_stencil(p->format) ||
+       util_format_is_pure_integer(p->format) || util_format_is_compressed(p->format) ||
+       native_format(p, &fmt, &swizzle))
+      return false;
+   if (p->format == PIPE_FORMAT_R11G11B10_FLOAT || p->format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return true;
+   for (unsigned c = 0; c < desc->nr_channels; c++)
+      if (desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT ||
+          desc->channel[c].type == UTIL_FORMAT_TYPE_SIGNED || desc->channel[c].size > 8)
+         return true;
+   return false;
+}
+
+/* the texel bytes of res's copy: its own, half floats' or RGBA8's */
 static unsigned
 copy_bytes(const struct sgx_resource *res)
 {
    uint32_t fmt, swizzle;
    unsigned b = native_format(&res->base, &fmt, &swizzle);
 
-   return b ? b : 4;
+   return b ? b : sgx_resource_copy_f16(&res->base) ? 8 : 4;
+}
+
+/* a row of a format the copy holds as half floats: R, G, B, A each */
+static void
+unpack_row_f16(enum pipe_format format, const uint8_t *line, unsigned w, uint32_t *row)
+{
+   float rgba[4 * 64];
+
+   for (unsigned x = 0; x < w; x += 64) {
+      unsigned n = MIN2(w - x, 64);
+
+      util_format_unpack_rgba(format, rgba, line + x * util_format_get_blocksize(format), n);
+      for (unsigned i = 0; i < 4 * n; i++)
+         ((uint16_t *)row)[4 * x + i] = _mesa_float_to_half(rgba[i]);
+   }
 }
 
 /* Rows y0..y1, columns x0..x1 of a level of the copy, from the linear
@@ -329,6 +371,8 @@ copy_level(const struct sgx_resource *res, unsigned level, unsigned face_layer, 
                         face_layer * res->layer_size[level];
    uint32_t fmt, swizzle;
    unsigned native = native_format(p, &fmt, &swizzle);
+   bool f16 = !native && sgx_resource_copy_f16(p);
+   unsigned out = native ? native : f16 ? 8 : 4;
    /* the columns of content the box reads (padding: the last one) */
    unsigned cx0 = scale ? 0 : MIN2(x0, lw - 1), cx1 = scale ? lw : MAX2(MIN2(x1, lw), cx0 + 1);
    unsigned bytes = util_format_get_blocksize(p->format);
@@ -345,9 +389,11 @@ copy_level(const struct sgx_resource *res, unsigned level, unsigned face_layer, 
        * unpacking) */
       if (native)
          memcpy(row, line + cx0 * bytes, (cx1 - cx0) * bytes);
+      else if (f16)
+         unpack_row_f16(p->format, line + cx0 * bytes, cx1 - cx0, row);
       else
          unpack_row(p->format, line + cx0 * bytes, cx1 - cx0, row);
-      switch (native) {
+      switch (out) {
       case 1:
          for (unsigned x = x0; x < x1; x++)
             dst[twiddle_at(t, x, y)] = ((const uint8_t *)row)[SX(x)];
@@ -355,6 +401,10 @@ copy_level(const struct sgx_resource *res, unsigned level, unsigned face_layer, 
       case 2:
          for (unsigned x = x0; x < x1; x++)
             ((uint16_t *)dst)[twiddle_at(t, x, y)] = ((const uint16_t *)row)[SX(x)];
+         break;
+      case 8:
+         for (unsigned x = x0; x < x1; x++)
+            ((uint64_t *)dst)[twiddle_at(t, x, y)] = ((const uint64_t *)row)[SX(x)];
          break;
       default:
          for (unsigned x = x0; x < x1; x++)
@@ -365,7 +415,7 @@ copy_level(const struct sgx_resource *res, unsigned level, unsigned face_layer, 
    }
 }
 
-static bool zs_to_linear(struct sgx_resource *res);
+static bool zs_to_linear(struct sgx_resource *res, unsigned level, unsigned layer);
 
 static bool
 copy_texture(struct sgx_context *ctx, struct sgx_resource *res, unsigned first)
@@ -442,7 +492,7 @@ copy_texture(struct sgx_context *ctx, struct sgx_resource *res, unsigned first)
       res->tw_first = first;
    }
    out = res->tw_cpu ? res->tw_cpu : MALLOC(size);
-   row = MALLOC(MAX2(tw, 1) * 4);
+   row = MALLOC(MAX2(tw, 1) * 8);
    if (!out || !row || !sgx_bo_map(res->bo)) {
       if (out != res->tw_cpu)
          FREE(out);
@@ -453,8 +503,9 @@ copy_texture(struct sgx_context *ctx, struct sgx_resource *res, unsigned first)
     * from the ISP's tiles (M37: a shadow map) */
    if (res->gpu_written || res->external)
       sgx_bo_wait(res->bo, -1);
-   if (util_format_is_depth_or_stencil(p->format) && res->zls && res->zls_valid)
-      zs_to_linear(res);
+   for (unsigned i = 0; util_format_is_depth_or_stencil(p->format) && i < res->nzls; i++)
+      if (res->zls[i].valid || res->zls[i].cleared)
+         zs_to_linear(res, i / p->array_size, i % p->array_size);
    for (unsigned f = 0; f < faces; f++) {
       uint8_t *dst = out + f * face;
 
@@ -640,6 +691,11 @@ sgx_resource_texture(struct sgx_context *ctx, struct sgx_resource *res,
        * SceGxmTextureType), the format in 28:24, the size: log2 w in 19:16
        * and log2 h in 3:0, or w - 1 in 23:12 and h - 1 in 11:0 */
       native_format(p, &fmt, &swizzle);
+      /* (M43) a copy of half floats, R G B A: swizzle ABGR */
+      if (sgx_resource_copy_f16(p)) {
+         fmt = 0x1b;
+         swizzle = 0;
+      }
       /* depth: F32 (0x12), its one channel raw; nearest -- the sampler
        * filters no F32 (iOS has no OES_texture_float_linear) */
       if (util_format_is_depth_or_stencil(p->format)) {
@@ -688,58 +744,81 @@ sgx_resource_screen_init(struct sgx_screen *screen)
  * ISP stores them (M24, res->zls): 32 x 32 pixels a tile, row by row, 4
  * bytes a pixel -- F32 depth alone, or 24-bit depth with the stencil in the
  * top byte -- tile (x, y) at (x + y * S) * 4 KiB, S two tiles for every 64
- * pixels of the width.  A map of level 0 brings the resource's own linear
- * copy, in its format, up to date from them (or from a clear no render has
- * done yet); an unmap that wrote puts it back, for the next render to load. */
-static uint32_t *
-zls_texel(struct sgx_resource *res, unsigned x, unsigned y)
+ * pixels of the width (the level's).  A map of a level's layer brings the
+ * resource's own linear copy of it, in its format, up to date from them (or
+ * from a clear no render has done yet); an unmap that wrote puts it back,
+ * for the next render to load. */
+struct sgx_zls *
+sgx_resource_zls(struct sgx_resource *res, unsigned level, unsigned layer)
 {
-   unsigned s = 2 * DIV_ROUND_UP(res->base.width0, 64);
+   unsigned n = (res->base.last_level + 1) * res->base.array_size;
 
-   return (uint32_t *)((uint8_t *)res->zls->map + (x / 32 + y / 32 * s) * 4096) +
+   if (level > res->base.last_level || layer >= res->base.array_size)
+      return NULL;
+   if (!res->zls) {
+      if (!(res->zls = CALLOC(n, sizeof(*res->zls))))
+         return NULL;
+      res->nzls = n;
+   }
+   return &res->zls[level * res->base.array_size + layer];
+}
+
+static uint32_t *
+zls_texel(const struct sgx_zls *zls, unsigned w, unsigned x, unsigned y)
+{
+   unsigned s = 2 * DIV_ROUND_UP(w, 64);
+
+   return (uint32_t *)((uint8_t *)zls->bo->map + (x / 32 + y / 32 * s) * 4096) +
           (y % 32) * 32 + x % 32;
 }
 
 static bool
-zs_to_linear(struct sgx_resource *res)
+zs_to_linear(struct sgx_resource *res, unsigned level, unsigned layer)
 {
    struct pipe_resource *p = &res->base;
+   struct sgx_zls *zls = sgx_resource_zls(res, level, layer);
+   unsigned w = u_minify(p->width0, level), h = u_minify(p->height0, level);
    bool stencil = util_format_has_stencil(util_format_description(p->format));
    bool depth = util_format_has_depth(util_format_description(p->format));
-   bool tiles = res->zls && res->zls_valid && sgx_bo_map(res->zls);
+   bool tiles = zls && zls->bo && zls->valid && sgx_bo_map(zls->bo);
    uint8_t *map = sgx_bo_map(res->bo);
-   float *z = MALLOC(p->width0 * sizeof(float));
-   uint8_t *st = MALLOC(p->width0);
+   float *z = MALLOC(w * sizeof(float));
+   uint8_t *st = MALLOC(w);
 
-   if (!map || !z || !st) {
+   if (!map || !z || !st || !zls) {
       FREE(z);
       FREE(st);
       return false;
    }
+   /* (never stored nor cleared: the copy is what there is) */
+   if (!tiles && !zls->cleared) {
+      FREE(z);
+      FREE(st);
+      return true;
+   }
    if (tiles)
-      sgx_bo_wait(res->zls, -1);
-   for (unsigned y = 0; y < p->height0; y++) {
-      uint8_t *row = map + res->offset[0] + y * res->stride[0];
+      sgx_bo_wait(zls->bo, -1);
+   for (unsigned y = 0; y < h; y++) {
+      uint8_t *row = map + res->offset[level] + layer * res->layer_size[level] +
+                     y * res->stride[level];
 
-      for (unsigned x = 0; x < p->width0; x++) {
-         uint32_t w = tiles ? *zls_texel(res, x, y) : 0;
+      for (unsigned x = 0; x < w; x++) {
+         uint32_t wd = tiles ? *zls_texel(zls, w, x, y) : 0;
 
          if (stencil) {
-            z[x] = (w & 0xffffff) / 16777215.0f;
-            st[x] = w >> 24;
+            z[x] = (wd & 0xffffff) / 16777215.0f;
+            st[x] = wd >> 24;
          } else {
-            memcpy(&z[x], &w, 4);
+            memcpy(&z[x], &wd, 4);
             st[x] = 0;
          }
-         if (res->zls_cleared)
-            z[x] = res->zls_clear;
-         else if (!tiles)
-            z[x] = 1.0f;
+         if (zls->cleared)
+            z[x] = zls->clear;
       }
       if (depth)
-         util_format_pack_z_float(p->format, row, z, p->width0);
+         util_format_pack_z_float(p->format, row, z, w);
       if (stencil)
-         util_format_pack_s_8uint(p->format, row, st, p->width0);
+         util_format_pack_s_8uint(p->format, row, st, w);
    }
    FREE(z);
    FREE(st);
@@ -747,29 +826,33 @@ zs_to_linear(struct sgx_resource *res)
 }
 
 static void
-linear_to_zs(struct sgx_screen *screen, struct sgx_resource *res)
+linear_to_zs(struct sgx_screen *screen, struct sgx_resource *res, unsigned level,
+             unsigned layer)
 {
    struct pipe_resource *p = &res->base;
+   struct sgx_zls *zls = sgx_resource_zls(res, level, layer);
+   unsigned lw = u_minify(p->width0, level), lh = u_minify(p->height0, level);
    bool stencil = util_format_has_stencil(util_format_description(p->format));
    bool depth = util_format_has_depth(util_format_description(p->format));
    uint8_t *map = sgx_bo_map(res->bo);
-   float *z = MALLOC(p->width0 * sizeof(float));
-   uint8_t *st = MALLOC(p->width0);
+   float *z = MALLOC(lw * sizeof(float));
+   uint8_t *st = MALLOC(lw);
 
-   if (!res->zls) {
-      res->zls = sgx_bo_create(&screen->dev, sgx_frame_zls_size(p->width0, p->height0), 0, 0);
-      res->zls_valid = false;
+   if (zls && !zls->bo) {
+      zls->bo = sgx_bo_create(&screen->dev, sgx_frame_zls_size(lw, lh), 0, 0);
+      zls->valid = false;
    }
-   if (map && z && st && res->zls && sgx_bo_map(res->zls)) {
-      sgx_bo_wait(res->zls, -1);
-      for (unsigned y = 0; y < p->height0; y++) {
-         const uint8_t *row = map + res->offset[0] + y * res->stride[0];
+   if (map && z && st && zls && zls->bo && sgx_bo_map(zls->bo)) {
+      sgx_bo_wait(zls->bo, -1);
+      for (unsigned y = 0; y < lh; y++) {
+         const uint8_t *row = map + res->offset[level] + layer * res->layer_size[level] +
+                              y * res->stride[level];
 
          if (depth)
-            util_format_unpack_z_float(p->format, z, row, p->width0);
+            util_format_unpack_z_float(p->format, z, row, lw);
          if (stencil)
-            util_format_unpack_s_8uint(p->format, st, row, p->width0);
-         for (unsigned x = 0; x < p->width0; x++) {
+            util_format_unpack_s_8uint(p->format, st, row, lw);
+         for (unsigned x = 0; x < lw; x++) {
             uint32_t w;
 
             if (stencil) {
@@ -780,11 +863,11 @@ linear_to_zs(struct sgx_screen *screen, struct sgx_resource *res)
             } else {
                memcpy(&w, &z[x], 4);
             }
-            *zls_texel(res, x, y) = w;
+            *zls_texel(zls, lw, x, y) = w;
          }
       }
-      res->zls_valid = true;
-      res->zls_cleared = false;
+      zls->valid = true;
+      zls->cleared = false;
    }
    FREE(z);
    FREE(st);
@@ -818,18 +901,24 @@ sgx_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc, unsigned
    /* a depth clear at the start of a render that has no draws yet: the
     * buffer's own from now on (what the CPU reads, or writes over) */
    if (ctx->batch.zs_cleared && !ctx->batch.ndraws && ctx->fb.zsbuf.texture == prsc) {
-      res->zls_cleared = true;
-      res->zls_clear = ctx->batch.depth_clear;
+      struct sgx_zls *zls = sgx_resource_zls(res, ctx->fb.zsbuf.level, ctx->fb.zsbuf.first_layer);
+
+      if (zls) {
+         zls->cleared = true;
+         zls->clear = ctx->batch.depth_clear;
+      }
       ctx->batch.zs_cleared = false;
    }
    /* depth and stencil from the ISP's tiles, unless all of it is to be
-    * written */
+    * written (the level's layers the box takes) */
    if (util_format_is_depth_or_stencil(prsc->format) && prsc->target != PIPE_BUFFER &&
-       !level && !(usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
-       !((usage & PIPE_MAP_DISCARD_RANGE) && box->width == (int)prsc->width0 &&
-         box->height == (int)prsc->height0) &&
-       !zs_to_linear(res))
-      return NULL;
+       !(usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+       !((usage & PIPE_MAP_DISCARD_RANGE) && box->width == (int)u_minify(prsc->width0, level) &&
+         box->height == (int)u_minify(prsc->height0, level))) {
+      for (int z = box->z; z < box->z + MAX2(box->depth, 1); z++)
+         if (!zs_to_linear(res, level, z))
+            return NULL;
+   }
    if (!(map = res->data ? res->data : sgx_bo_map(res->bo)))
       return NULL;
    /* (a map glthread makes in the application's thread: nothing of the
@@ -925,8 +1014,10 @@ sgx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
       if (ptrans->resource->target == PIPE_BUFFER && !(ptrans->usage & PIPE_MAP_FLUSH_EXPLICIT))
          buffer_written(res, ptrans->box.x, ptrans->box.x + ptrans->box.width, ptrans->usage);
       if (util_format_is_depth_or_stencil(ptrans->resource->format) &&
-          ptrans->resource->target != PIPE_BUFFER && !ptrans->level)
-         linear_to_zs(sgx_screen(pctx->screen), res);
+          ptrans->resource->target != PIPE_BUFFER) {
+         for (int z = box->z; z < box->z + MAX2(box->depth, 1); z++)
+            linear_to_zs(sgx_screen(pctx->screen), res, ptrans->level, z);
+      }
    }
    if (ptrans->resource->target == PIPE_BUFFER &&
        (ptrans->usage & (PIPE_MAP_THREAD_SAFE | PIPE_MAP_PERSISTENT)))

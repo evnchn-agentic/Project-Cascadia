@@ -614,7 +614,13 @@ texture(struct comp *c, nir_tex_instr *tex, struct scratch *s)
                      "pixels: level 0");
    }
    d = block(c, 4, 4);
-   if (getenv("SGX_TEX_F32")) {
+   if (c->fs->blend.tex_f16 >> tex->texture_index & 1) {
+      /* (M43) a copy of half floats: four F32 back, as they are */
+      emit(c, smp(USSE_SMP_F32, USSE_SMP_COORD_F32, treg(c, d), coords,
+                  usse_reg(USSE_SA, c->sampler_sa + 4 * c->slot_of_unit[tex->texture_index]),
+                  mode, lodreg));
+      emit(c, USSE_WDF0);
+   } else if (getenv("SGX_TEX_F32")) {
       emit(c, smp(USSE_SMP_F32, USSE_SMP_COORD_F32, treg(c, d),
                          coords,
                          usse_reg(USSE_SA, c->sampler_sa + 4 * c->slot_of_unit[tex->texture_index]),
@@ -857,7 +863,7 @@ lower_fetch_coords(struct comp *c, nir_shader *s, nir_function_impl *impl)
          if (tex->op != nir_texop_tex || tex->is_shadow || tex->is_array ||
              tex->num_srcs != 1 || coord < 0 || tex->coord_components != 2 ||
              tex->texture_index >= MAX_UNITS ||
-             (c->fs->blend.tex_depth >> tex->texture_index & 1) ||
+             ((c->fs->blend.tex_depth | c->fs->blend.tex_f16) >> tex->texture_index & 1) ||
              (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
               tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL &&
               tex->sampler_dim != GLSL_SAMPLER_DIM_RECT))
@@ -967,7 +973,8 @@ plan_inputs(struct comp *c, nir_function_impl *impl)
 
             if (instr->type != nir_instr_type_tex || c->nfetch == SGX_FRAME_MAX_FETCH ||
                 (slot = fetch_slot(c, nir_instr_as_tex(instr))) < 0 || c->flat[slot] ||
-                (c->fs->blend.tex_depth >> nir_instr_as_tex(instr)->texture_index & 1))
+                ((c->fs->blend.tex_depth | c->fs->blend.tex_f16) >>
+                 nir_instr_as_tex(instr)->texture_index & 1))
                continue;
             fix = fixed_index(c, nir_instr_as_tex(instr));
             c->fetch_fix[c->nfetch] = fix < 0 ? 0 : c->fixed_fix[fix];
@@ -2713,15 +2720,23 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
        * already -- caps.texrect off -- and leaves the dimension Rect) */
       nir_lower_tex_options tex = { .lower_txp = ~0u, .lower_1d = true };
 
-      /* the linear sampler reads B G R A: other orders swizzled back */
+      /* the linear sampler reads B G R A: other orders swizzled back --
+       * and a view's swizzle on what that gives (M43) */
       for (unsigned u = 0; blend && u < 8; u++) {
-         if (!((blend->tex_swap | blend->tex_x8) >> u & 1))
+         uint8_t base[4];
+
+         if (!((blend->tex_swap | blend->tex_x8 | blend->tex_swz) >> u & 1))
             continue;
+         base[0] = blend->tex_swap >> u & 1 ? 2 : 0;
+         base[1] = 1;
+         base[2] = blend->tex_swap >> u & 1 ? 0 : 2;
+         base[3] = blend->tex_x8 >> u & 1 ? PIPE_SWIZZLE_1 : 3;
          tex.swizzle_result |= 1u << u;
-         tex.swizzles[u][0] = blend->tex_swap >> u & 1 ? 2 : 0;
-         tex.swizzles[u][1] = 1;
-         tex.swizzles[u][2] = blend->tex_swap >> u & 1 ? 0 : 2;
-         tex.swizzles[u][3] = blend->tex_x8 >> u & 1 ? PIPE_SWIZZLE_1 : 3;
+         for (unsigned c = 0; c < 4; c++) {
+            unsigned v = blend->tex_swz >> u & 1 ? blend->tex_swizzle[u][c] : c;
+
+            tex.swizzles[u][c] = v <= PIPE_SWIZZLE_W ? base[v] : v;
+         }
       }
       if (blend)
          tex.lower_srgb = blend->tex_srgb;
