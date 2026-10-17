@@ -3080,9 +3080,10 @@ Measured (the same boot, SuperTux 0.6.3 in its menu, landscape, under X):
 
 What is left of the dip is the GPU's: `SGX_DEBUG=fps,sync` (each render
 waited for) shows 11-12 ms of GPU a render before it and **16 ms** in it.
-The rest of the copies are SDL's: libSDL2 itself (`+0x5e4d0`, 30 million
-copies of 4 bytes -- per vertex, unresolved: Alpine's SDL2 has no debug
-package) and SDL_image's loading.
+The rest of the copies are SDL's: libSDL2 itself (30 million copies of 4
+bytes: `GL_QueueGeometry`'s colour of each vertex, an `SDL_memcpy` call
+per vertex -- SDL_render_gl.c:1021, named by gdb with `sdl2-dbg`) and
+SDL_image's loading.
 
 Checked: the regression programs (glclear, gltri, glfs, gltex, glblend,
 gldepth, glcull, gldiscard, glstencil, glwrap, glvtx, glmip, glvary,
@@ -3090,6 +3091,69 @@ glldr, glflow, glfetch, gldesk, glupload, gloffset, glproj) all pass;
 glspeed's sprites 25.3 ms a frame (GPU-bound, as before); dEQP's
 vertex_arrays, draw, buffer, attribute_location, default_vertex_attrib,
 clipping and rasterization groups as in M38.
+
+### SuperTux 0.7.0; a render's textures
+
+Alpine 3.24 has SuperTux 0.6.3; 0.7.0 (March 2026) is built here as a
+package: `tools/desktop/supertux` -- Alpine's APKBUILD brought to 0.7.0's
+CMake build, libepoxy for its OpenGL renderer (`USE_GL_LIBRARY`), pkgrel
+100+, `sh tools/desktop/supertux/build.sh` (abuild in docker for armhf,
+~10 min; the 292 MB source kept in `build/supertux/distfiles`), `build.sh
+install` (the packages through `/var/tmp`: the data are 283 MB and the
+iPad's /tmp is 128 MB of RAM; libraqm, new in 0.7.0, by
+`tools/device-apk.sh`). Two patches:
+
+- `supertux-musl-no-execinfo.patch`: the crash handler's `backtrace()` is
+  glibc's (Alpine no longer has libexecinfo).
+- `supertux-gl2-context.patch`: 0.7.0's `--renderer opengl` is OpenGL 3.3
+  core; `opengl20` asks 2.0 and `opengl_auto` 3.3 then the version found.
+  On a 2.1 driver the 3.3 context fails and 0.7.0 carried on without one
+  (epoxy aborts: no current context) -- now that is thrown, and
+  `opengl_auto` falls back to `opengl20` before the SDL renderer. And with
+  epoxy SuperTux sets `SDL_HINT_VIDEO_X11_FORCE_EGL`: SDL's EGL path
+  (`SDL_EGL_CreateContext`, SDL_egl.c:1075) asks a desktop context for
+  `GL_MAJOR_VERSION` to decide on surfaceless contexts, OpenGL 2 has no
+  such query, and SuperTux's first `glGetError()` took the
+  `GL_INVALID_ENUM` for its own -- cleared after the context is made. (Who
+  asked: gdb on `_mesa_error`, `sdl2-dbg` for SDL's names.)
+
+**Three renders a frame.** 0.7.0's menu samples more than 96 MiB of
+textures a frame (contents and the sampler's copies), and past
+`SGX_BATCH_TEX_BYTES` (48 MiB, M35) a render was made and another begun:
+three renders, the screen stored and loaded between them, 3 x 7.4 ms of
+GPU. `SGX_DEBUG=fps` now says what a render made for want of room ran out
+of (`renders from sgx_draw.c:1456 148 ... (no room for: draws 0, buffers
+0, textures 148, bytes 0)`). The limit is for textures that only the
+render keeps -- piglit's streaming-texture-leak makes, draws with and
+deletes 5000 of 4 MiB -- so only those count now: a texture whose last
+reference is the render's, and a copy an upload replaced. One render a
+frame, 18.8 ms of GPU:
+
+| SuperTux 0.7.0's menu | before | after |
+|---|---|---|
+| `--renderer sdl` | 33 fps, 3 renders | 43 fps, 1 render |
+| `--renderer opengl20` (GLX) | 29 fps, 3 renders | 33 fps, 1 render |
+
+streaming-texture-leak for 150 s: the iPad's available memory stays at
+235-250 MB (renders still go for the deleted ones). The regression
+programs all pass; glspeed's sprites 26.0 ms.
+
+Found on the way: the fixed function's room check did not count the
+vertex chunks among the render's buffers (handles past 256 written over
+`bos[]` when both kinds share a render), and a new chunk now also needs a
+handle's room.
+
+**Not solved: EGL, vsync, fullscreen.** `--renderer opengl20` as SuperTux
+runs it -- EGL (the hint), swap interval 1 (its `vsync 1`), a fullscreen
+window out of the composition (M40) -- shows nothing: the desktop stays on
+the screen (`/dev/fb0` too) while the game draws 33 fps. Through GLX
+(`SDL_VIDEO_X11_FORCE_EGL=0`, the environment beats SDL's hint) or with
+`vblank_mode=0` it is shown; es2gears_x11 in a window is shown either way.
+So it is the Present path of a fullscreen window with a target MSC --
+perhaps a page flip, which modesetting may try for it; not looked into
+yet. Meanwhile the SDL renderer, the default and the fastest, is shown.
+And 0.7.0's SDL renderer has its draws merged no more (0 of ~215 a frame;
+0.6.3's were): what differs between them is not looked into either.
 
 ## Testing, without and with the device
 
