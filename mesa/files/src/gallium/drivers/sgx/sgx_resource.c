@@ -253,9 +253,10 @@ unpack_row(enum pipe_format format, const uint8_t *line, unsigned w, uint32_t *r
  * iOS's layout (a 64x64's levels at +0, +0x4000, +0x5000, ...,
  * p105-gpu.md's mipmap transfers); a cube map's faces each as far apart as
  * a whole chain down to 1 x 1, whatever levels it has, rounded up to 2 KiB
- * from 16 x 16 up (glmip --probe: 4 x 4 faces 21 texels apart, 8 x 8 85,
- * 16 x 16 512, 32 x 32 1536, 64 x 64 5632; Vita3K's texture cache has the
- * same rules for the same GPU).  A 2D texture's size not a power of two is
+ * once level 0 is 512 bytes or more (glmip --probe, RGBA8: 4 x 4 faces 21
+ * texels apart, 8 x 8 85, 16 x 16 512, 32 x 32 1536, 64 x 64 5632; Vita3K's
+ * texture cache has the same rules for the same GPU -- M43: in bytes, as
+ * one-byte and eight-byte texels' cube maps showed).  A 2D texture's size not a power of two is
  * padded, the last column and row repeated: the sampler takes the size as
  * it is (sgx_resource_texture), the padding is its memory's layout.  A cube
  * map's is scaled up to one, the nearest texel (GXM's arbitrary cube map,
@@ -288,10 +289,6 @@ native_format(const struct pipe_resource *p, uint32_t *fmt, uint32_t *swizzle)
    *fmt = 0x0c;
    *swizzle = 0;
    if (!on)
-      return 0;
-   /* (a cube map of one-byte texels: its faces are not where the 2 KiB
-    * rule puts them -- dEQP's size.cube.16x16_l8 -- made RGBA8) */
-   if (p->target == PIPE_TEXTURE_CUBE && util_format_get_blocksize(p->format) == 1)
       return 0;
    switch (util_format_linear(p->format)) {
    case PIPE_FORMAT_R8G8B8A8_UNORM: *fmt = 0x0c; *swizzle = 0; return 4;  /* ABGR */
@@ -444,7 +441,10 @@ copy_texture(struct sgx_context *ctx, struct sgx_resource *res, unsigned first)
       size += MAX2(tw >> l, 1) * MAX2(th >> l, 1) * b;
    for (unsigned l = 0; faces > 1 && (tw >> l || th >> l); l++)
       face += MAX2(tw >> l, 1) * MAX2(th >> l, 1) * b;
-   if (faces > 1 && tw >= 16 && th >= 16)
+   /* (M43: a face 2 KiB aligned when level 0's is 512 bytes or more --
+    * 16 x 16 of four-byte texels, 8 x 8 of eight, 32 x 32 of one: dEQP's
+    * random_teximage2d.cube_7, an 8 x 8 cube map of half floats) */
+   if (faces > 1 && tw * th * b >= 512)
       face = align(face, 2048);
    if (faces > 1)
       size = 5 * face + size;
