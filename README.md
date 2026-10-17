@@ -766,6 +766,10 @@ The next in line with no particular order after the iPad mini 1 (Phase 4):
 - iPad Air 2 — A8X
 - iPad 4 - A6X
 - iPad mini 4 — A8
+- iPad 2 - A5
+- iPad 3 - A5X
+- iPad Pro 11" 2020 - A12Z (Most powerful iPad, Linux can be ported on)
+- iPad Pro 10.5" 2017 - A10X
 - iPad mini 5 — A12 (requires additional hardware for booting, just like the A5)
 - iPad 9 — A13 (requires additional hardware for booting)
 - iPad 5 — A9
