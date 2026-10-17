@@ -3220,6 +3220,93 @@ make M43; the compiler M44; then the hardware to find (several targets,
 MSAA, arrays) with an iOS capture for each; 3.0, then 3.3 core -- SuperTux's
 `--renderer opengl` as it is the measure of the last.
 
+## M43: the first small items towards OpenGL 3
+
+Each item of M42's plan, then piglit's groups for it, the build before
+against this one (the system's M42 Mesa against `mesa/devbuild.sh
+release`): what passed must pass, what is new is looked at.
+
+**ARB_framebuffer_object** wants `caps.mixed_framebuffer_sizes`:
+attachments of different sizes render over what they have in common (the
+framebuffer's width and height, Mesa's minimum). `sgx_frame_target` has an
+area now (w, h; 0 the level's), which the end of tile's clip and the
+render target data take; the depth buffer's tiles keep their own width, so
+a depth buffer larger than the colour is stored in place. A depth clear at
+a render's start, and the colour clear of a whole surface, are taken only
+when the framebuffer covers the attachment -- else a quad in the render.
+
+**glBlitFramebuffer** as GL has it, on the CPU: each destination pixel's
+centre taken back into the source (any sign of either box: mirrored
+blits), nearest or between the four texels around it, clamped to the
+source's edges; nothing written where the centre falls outside the source
+or the scissor; blended with the source's alpha when st asks; colour, then
+depth and stencil, when the mask has both (it used to give up: "a blit
+scissored ... not done yet").
+
+**A depth buffer's tiles for each level and layer.** The ISP's tiles were
+one buffer a resource, at level 0's size: a depth texture's levels
+rendered to (`depthstencil-render-miplevels`, `fbo-clear-formats`) went
+into level 0's. `sgx_resource_zls(res, level, layer)`: a buffer, valid and
+cleared flags and the clear's depth for each, made at their first use;
+maps, the sampler's copy and renders take the level's. And a depth clear
+no draw followed was dropped when the framebuffer changed (the batch
+flushed with no draws) -- or taken by the next framebuffer's render: it is
+noted for its level now.
+
+**EXT_texture_swizzle**: a view's swizzle in the program, after the
+texture unit's own channel order (`sgx_blend_key.tex_swizzle`, through
+`nir_lower_tex`'s swizzles); depth views keep theirs (M37).
+
+**Textures wider than 8 bits a channel.** The sampler's copy was RGBA8 for
+every format the hardware had not: floats, signed and 16-bit channels lost
+their range and sign. The texture formats are PS Vita's
+(`SceGxmTextureBaseFormat`: U8 0x00, U8U8 0x07, U8U8U8U8 0x0c, F32 0x12,
+F32M 0x13, F16F16F16F16 0x1b -- every one this driver knew is in that
+list), and F16x4 is filtered: a format with a float, signed or wider than
+8-bit channel, RGB10_A2, R11G11B10F and RGB9E5 are copied as four half
+floats (`sgx_resource_copy_f16`; util_format unpacks them, `_mesa_float_
+to_half` packs), and sampled with SMP's F32 return -- the four channels as
+F32, nothing to unpack or scale (`sgx_blend_key.tex_f16`; not by the PDS's
+lookups, whose texel is bytes). Floats keep F16's precision (11 bits, up
+to 65504): the sampler filters no F32 (iOS has no
+OES_texture_float_linear). ARB_texture_float, EXT_texture_snorm and
+EXT_texture_shared_exponent are the driver's now. `tools/sgx/gl/glfmt.c`:
+2 x 2 textures of each, sampled at texel centres and filtered, scaled into
+[0, 1] by the program and read back against what GL says the format keeps
+-- 32 of 32.
+
+**Render targets of R8 and RG8** (ARB_texture_rg wants them renderable,
+not just sampled). The pixel back end's format word is GXM's colour format
+too (`SceGxmColorFormat`: the base format in bits 31:28 and 24:23 -- U8
+0x80800000, U8U8 0xb0800000 -- the swizzle in 21:20) with bit 16 set, as
+all of iOS's captures have it. Bit 26, which those captures' 565, 4444 and
+5551 had, is GXM's *tiled* surface: with it glfmt's half quad landed in
+whole rows of memory, each 32 x 32 tile's pixels one after another (tile
+(1, 0) at 2 KiB, (1, 1) at 6 KiB). Linear: R8 0x80810000, RG8 0xb0810000,
+the line stride in the target's own pixels. The tile holds the program's
+colour as RGBA bytes whatever the target, and the PBE takes R (and G) from
+it; the background object loads the target's texels back as a texture of
+its format (U8 with L8's 1RRR swizzle, U8U8 with GR). No two-channel
+swizzle gives alpha 1, so blending treats a target without alpha as alpha
+1 (gallium's rule: DST_ALPHA one, INV_DST_ALPHA and SRC_ALPHA_SATURATE
+zero). `sgx_frame.c`'s `rt_format()`; `SGX_PBE_R8=...` and `SGX_BG_R8=...`
+try others. glfmt's targets: cleared, a render later half drawn (the left
+half loaded from memory), added to, multiplied by the destination's alpha,
+read back and sampled -- RGBA8, R8, RG8, 6 of 6.
+
+piglit: FBO, blit, depth, stencil, shadow and swizzle groups 149 -> 243
+passes; texture formats 109 -> 139; with R8 and RG8 targets, the
+texture_rg, RGTC, FBO, blending and texwrap groups 113 -> 219 (and
+`fbo-blending-formats` passes); nothing that passed fails.
+
+**Gaps the new tests ran into** (they had been skipped): 3D textures --
+GL 1.2's, not there at all (`fbo-incomplete`, `fbo-generatemipmap-3d`);
+the border colour (every `texwrap formats bordercolor`); `gl_FragDepth`
+(`depth-clear-precision-check`); a sampler LOD bias past +4 (word 0's field
+is -3.875 .. 4: `tex-miplevel-selection` with a bias of 5); gl_PointCoord;
+MSAA (`ext_framebuffer_multisample` with 0 samples); sRGB render targets
+(`cubemap-getteximage-pbo`).
+
 ## Testing, without and with the device
 
 - **Host, every change:** the kernel driver builds with `W=1` against the
