@@ -785,6 +785,23 @@ no_room(unsigned what)
    return true;
 }
 
+/* what kept a draw from being merged into the last one (SGX_DEBUG=fps:
+ * "not merged", M42) */
+enum { MERGE_PROGRAM, MERGE_TEXTURES, MERGE_FS_SA, MERGE_LAYOUT, MERGE_STATE, MERGE_VS_SA,
+       MERGE_VERTICES, MERGE_PRIMS, MERGE_ROOM, MERGE_N };
+static const char *const merge_names[MERGE_N] = {
+   "programs", "textures", "pixel constants", "layout", "state", "vertex constants",
+   "vertices", "primitives", "room",
+};
+static unsigned merge_why[MERGE_N];
+
+static bool
+no_merge(unsigned what)
+{
+   merge_why[what]++;
+   return false;
+}
+
 /* SGX_TRACE=1: a thread waits for each render and says how long it took
  * from its kick, and how long since the last one ended (debugging speed) */
 #include <pthread.h>
@@ -866,6 +883,16 @@ sgx_batch_why(struct sgx_context *ctx)
                room_why[ROOM_BYTES]);
    memset(room_why, 0, sizeof(room_why));
    mesa_logi("sgx:  renders from%s", s);
+   n = 0;
+   s[0] = 0;
+   for (unsigned i = 0; i < MERGE_N; i++) {
+      if (merge_why[i])
+         n += snprintf(s + n, sizeof(s) - MIN2(n, sizeof(s)), "%s %s %u", n ? "," : "",
+                       merge_names[i], merge_why[i]);
+      merge_why[i] = 0;
+   }
+   if (n)
+      mesa_logi("sgx:  draws not merged, for their:%s", s);
 }
 
 void
@@ -1304,7 +1331,10 @@ drop_vchunks(struct sgx_batch *b)
 /* Room for n bytes of the stream after the batch's vertices (a new chunk
  * when the last has none): the CPU's address to write it at, noted in
  * ctx->vtx with its chunk referenced -- a flush before the draw is added
- * hands that chunk to the render, and vtx_commit() copies the stream on */
+ * hands that chunk to the render, and vtx_commit() copies the stream on.
+ * Right after them, dword aligned only: a draw merged into the last one
+ * needs its vertices to follow the last one's (aligned to 16, SDL's 120
+ * bytes a quad left a gap and nothing merged) */
 static uint8_t *
 vtx_reserve(struct sgx_context *ctx, unsigned n)
 {
@@ -1312,7 +1342,7 @@ vtx_reserve(struct sgx_context *ctx, unsigned n)
    struct sgx_batch *b = &ctx->batch;
    struct sgx_vtx *v = &ctx->vtx;
    struct sgx_bo *bo = b->nvchunks ? b->vchunk[b->nvchunks - 1] : NULL;
-   uint32_t at = align(b->vat, 16);
+   uint32_t at = align(b->vat, 4);
 
    if (!bo || at + n > bo->size) {
       if (b->nvchunks == SGX_BATCH_VCHUNKS ||
@@ -1385,20 +1415,30 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
    p = &b->draw[b->ndraws - 1];
    if (p->vs != vs || p->compiled != (fs != NULL) || p->repacked != v->repacked ||
        p->stride != v->stride ||
-       (fs && (p->prog.code_va != fs->prog.code_va || p->prog.pds_va != fs->prog.pds_va ||
-               !sgx_words_equal(b->sa + p->sa, sa, nsa))) ||
-       p->l.nvaryings != ctx->layout.nvaryings || p->l.f32 != ctx->layout.f32 ||
-       p->l.colour != ctx->layout.colour || p->l.ncolours != ctx->layout.ncolours ||
-       !sgx_frame_state_equal(&p->st, st) ||
-       p->vs_sa + nvsa > b->nsa || !sgx_words_equal(b->sa + p->vs_sa, ctx->vs_sa, nvsa))
-      return false;
+       (fs && (p->prog.code_va != fs->prog.code_va || p->prog.pds_va != fs->prog.pds_va)))
+      return no_merge(MERGE_PROGRAM);
+   if (fs && !sgx_words_equal(b->sa + p->sa, sa, nsa)) {
+      unsigned t0 = fs->sampler_sa, t1 = fs->sampler_sa + 4 * fs->nsamplers;
+
+      /* (only the textures' words: another texture) */
+      return no_merge(fs->nsamplers && t1 <= nsa && sgx_words_equal(b->sa + p->sa, sa, t0) &&
+                      sgx_words_equal(b->sa + p->sa + t1, sa + t1, nsa - t1) ?
+                      MERGE_TEXTURES : MERGE_FS_SA);
+   }
+   if (p->l.nvaryings != ctx->layout.nvaryings || p->l.f32 != ctx->layout.f32 ||
+       p->l.colour != ctx->layout.colour || p->l.ncolours != ctx->layout.ncolours)
+      return no_merge(MERGE_LAYOUT);
+   if (!sgx_frame_state_equal(&p->st, st))
+      return no_merge(MERGE_STATE);
+   if (p->vs_sa + nvsa > b->nsa || !sgx_words_equal(b->sa + p->vs_sa, ctx->vs_sa, nvsa))
+      return no_merge(MERGE_VS_SA);
 
    /* where its vertex 0 is among the last draw's vertices: right after
     * them (the CPU's stream), or where its attributes' addresses say --
     * the same number of vertices on for each */
    if (v->repacked) {
       if (v->vseq != b->seq || p->vdata_va + p->nverts * p->stride != v->vdata_va)
-         return false;
+         return no_merge(MERGE_VERTICES);
       at = p->nverts;
    } else {
       for (unsigned a = 0; a < vs->nattrs; a++) {
@@ -1408,11 +1448,11 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
             continue;
          if (!found) {
             if (!v->stride || d % v->stride)
-               return false;
+               return no_merge(MERGE_VERTICES);
             at = d / v->stride;
             found = true;
          } else if (d != at * v->stride) {
-            return false;
+            return no_merge(MERGE_VERTICES);
          }
       }
    }
@@ -1420,18 +1460,18 @@ merge_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *f
     * its indices */
    if (!v->indexed && !p->nidx) {
       if (at != p->count || p->count + v->count > sgx_frame_list_max(screen->frame))
-         return false;
+         return no_merge(MERGE_PRIMS);
    } else if (v->indexed && p->nidx) {
       if (p->idx + p->nidx != b->nidx || at + v->max_index > 0xffff)
-         return false;
+         return no_merge(MERGE_PRIMS);
    } else {
-      return false;
+      return no_merge(MERGE_PRIMS);
    }
    if (batch_bytes(b) + nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES ||
        b->ntex + b->nbos + b->nvchunks + more_handles(ctx, NULL, 0, v->bos, v->nbos) >
           SGX_FRAME_MAX_HANDLES ||
        !grow((void **)&b->idx, &b->maxidx, b->nidx + nidx, sizeof(uint16_t)))
-      return false;
+      return no_merge(MERGE_ROOM);
 
    add_handles(ctx, NULL, 0, v->bos, v->nbos);
    for (unsigned i = 0; i < nidx; i++)
