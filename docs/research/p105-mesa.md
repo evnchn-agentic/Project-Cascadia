@@ -3096,26 +3096,34 @@ clipping and rasterization groups as in M38.
 
 Alpine 3.24 has SuperTux 0.6.3; 0.7.0 (March 2026) is built here as a
 package: `tools/desktop/supertux` -- Alpine's APKBUILD brought to 0.7.0's
-CMake build, libepoxy for its OpenGL renderer (`USE_GL_LIBRARY`), pkgrel
-100+, `sh tools/desktop/supertux/build.sh` (abuild in docker for armhf,
-~10 min; the 292 MB source kept in `build/supertux/distfiles`), `build.sh
-install` (the packages through `/var/tmp`: the data are 283 MB and the
-iPad's /tmp is 128 MB of RAM; libraqm, new in 0.7.0, by
-`tools/device-apk.sh`). Two patches:
+CMake build with upstream's choices (GLEW), pkgrel 100+, `sh
+tools/desktop/supertux/build.sh` (abuild in docker for armhf, ~12 min;
+the 292 MB source kept in `build/supertux/distfiles`), `build.sh install`
+(the packages through `/var/tmp`: the data are 283 MB and the iPad's /tmp
+is 128 MB of RAM; libraqm, new in 0.7.0, by `tools/device-apk.sh`). One
+patch, for the C library and not the driver:
+`supertux-musl-no-execinfo.patch` (the crash handler's `backtrace()` is
+glibc's; Alpine no longer has libexecinfo).
 
-- `supertux-musl-no-execinfo.patch`: the crash handler's `backtrace()` is
-  glibc's (Alpine no longer has libexecinfo).
-- `supertux-gl2-context.patch`: 0.7.0's `--renderer opengl` is OpenGL 3.3
-  core; `opengl20` asks 2.0 and `opengl_auto` 3.3 then the version found.
-  On a 2.1 driver the 3.3 context fails and 0.7.0 carried on without one
-  (epoxy aborts: no current context) -- now that is thrown, and
-  `opengl_auto` falls back to `opengl20` before the SDL renderer. And with
-  epoxy SuperTux sets `SDL_HINT_VIDEO_X11_FORCE_EGL`: SDL's EGL path
-  (`SDL_EGL_CreateContext`, SDL_egl.c:1075) asks a desktop context for
-  `GL_MAJOR_VERSION` to decide on surfaceless contexts, OpenGL 2 has no
-  such query, and SuperTux's first `glGetError()` took the
-  `GL_INVALID_ENUM` for its own -- cleared after the context is made. (Who
-  asked: gdb on `_mesa_error`, `sdl2-dbg` for SDL's names.)
+**The game as it is.** The rule: programs are not fitted to the driver,
+the driver is made right for them. A first package (r100-r101) had
+libepoxy and a patch that let the OpenGL renderer run on OpenGL 2.1; r102
+is upstream's code again, and what it finds is the driver's to answer:
+
+| `--renderer` | what it asks | here |
+|---|---|---|
+| `sdl` (the default) | SDL's renderer, OpenGL 2.1 | 43 fps |
+| `opengl20` | an OpenGL 2.0 context | 33 fps |
+| `opengl_auto` | 3.3 core, else the SDL renderer | "GlewError: Missing GL version", the SDL renderer: 43 fps |
+| `opengl` | an OpenGL 3.3 core context | exits: there is none (GL 2.1, GLSL 1.20) |
+
+So OpenGL 3.3 is what is missing (the 3.3 core context fails, and 0.7.0
+then reads the version of no context: GLEW's error). What an epoxy build
+met on the way is the same gap: SuperTux then sets
+`SDL_HINT_VIDEO_X11_FORCE_EGL`, and SDL's EGL path (`SDL_EGL_CreateContext`,
+SDL_egl.c:1075) asks a desktop context for `GL_MAJOR_VERSION` -- a GL 3.0
+query, `GL_INVALID_ENUM` on 2.1 as the specification wants (found with
+gdb on `_mesa_error`, `sdl2-dbg` for SDL's names).
 
 **Three renders a frame.** 0.7.0's menu samples more than 96 MiB of
 textures a frame (contents and the sampler's copies), and past
@@ -3143,17 +3151,31 @@ vertex chunks among the render's buffers (handles past 256 written over
 `bos[]` when both kinds share a render), and a new chunk now also needs a
 handle's room.
 
-**Not solved: EGL, vsync, fullscreen.** `--renderer opengl20` as SuperTux
-runs it -- EGL (the hint), swap interval 1 (its `vsync 1`), a fullscreen
-window out of the composition (M40) -- shows nothing: the desktop stays on
-the screen (`/dev/fb0` too) while the game draws 33 fps. Through GLX
-(`SDL_VIDEO_X11_FORCE_EGL=0`, the environment beats SDL's hint) or with
-`vblank_mode=0` it is shown; es2gears_x11 in a window is shown either way.
-So it is the Present path of a fullscreen window with a target MSC --
-perhaps a page flip, which modesetting may try for it; not looked into
-yet. Meanwhile the SDL renderer, the default and the fastest, is shown.
-And 0.7.0's SDL renderer has its draws merged no more (0 of ~215 a frame;
-0.6.3's were): what differs between them is not looked into either.
+**Page flips; screenshots.** A fullscreen window out of the composition
+(M40) presenting with vsync (an EGL build's `--renderer opengl20`, its
+`vsync 1`) is page flipped: strace on Xorg shows a `MODE_PAGE_FLIP` and its
+event every ~30 ms, the game's pace, and the kernel copies each flipped
+buffer onto the screen whole. What looked like "nothing shown" was the
+screenshot: xwd reads X's front buffer, which a flip leaves behind (the
+desktop under the game), and a `/dev/fb0` read that went wrong.
+`tools/desktop/xshot.py --screen` reads the glass itself -- `/dev/fb0`,
+the scanout's memory, turned as X is (`rotate`).
+
+**Merging.** 0.7.0's SDL renderer has no draw merged into the last one.
+`SGX_DEBUG=fps` now says why a draw was not: here always another texture
+(SDL already joins draws with the same texture) or another program, which
+no render can merge. On the way: M42's stream reservations were aligned to
+16 bytes, and SDL's quads (6 vertices of 20 bytes) then left a gap after
+each draw, which kept draws with the same state from merging; dword
+aligned now (the fetch reads dwords; applications' buffers have any
+offset). dEQP's vertex_arrays, draw, buffer, attribute_location,
+default_vertex_attrib, clipping and rasterization as before.
+
+**Towards OpenGL 3.** glxinfo: GL 2.1, GLSL 1.20; of the 39 extensions
+Mesa wants for 3.0-3.3 (`compute_version()`, src/mesa/main/version.c)
+the driver has 10. 3.0 also wants GLSL 1.30, 4 colour attachments and 4
+samples (or Mesa's fake MSAA). What the SGX can do for each, and in which
+order, is the next milestone's plan.
 
 ## Testing, without and with the device
 

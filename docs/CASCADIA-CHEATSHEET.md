@@ -1334,13 +1334,16 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   odd Thumb address minus one). A draw's vertices now go straight into the
   render's vertex chunks in GPU memory (one copy, was three). Compare fps
   from one boot only: SuperTux's menu dip was ~37 one boot, ~45 the next.
-  SuperTux 0.7.0 (Alpine has 0.6.3): `sh tools/desktop/supertux/build.sh
-  install` (docker, ~10 min; then ~4 min to copy the 283 MB of data).
-  Renderers: `sdl` (default, fastest: 43 fps in the menu), `opengl20`,
-  `opengl_auto`; `opengl` is 3.3 core and fails here. Why a frame is
-  several renders: `SGX_DEBUG=fps`'s "renders from ... (no room for: ...)".
-  Who raised a GL error: `gdb -ex 'break _mesa_error'` (`sdl2-dbg` is on
-  the iPad for SDL's names).
+  SuperTux 0.7.0 (Alpine has 0.6.3; upstream's code, only a musl patch):
+  `sh tools/desktop/supertux/build.sh install` (docker, ~12 min; then ~4
+  min to copy the 283 MB of data). Renderers: `sdl` (default, fastest: 43
+  fps in the menu), `opengl20` (33); `opengl` is 3.3 core and fails here
+  (the driver's gap, not the game's). Why a frame is several renders, why
+  draws do not merge: `SGX_DEBUG=fps`'s "renders from ... (no room for:
+  ...)" and "draws not merged, for their: ...". Who raised a GL error:
+  `gdb -ex 'break _mesa_error'` (`sdl2-dbg` is on the iPad for SDL's
+  names). A fullscreen game flipped (vsync): `xshot.py --screen` (xwd
+  shows the desktop under it).
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.
@@ -1354,8 +1357,8 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
 | the OOM killer during piglit | a test making textures without end: renders now go when they hold 48 MiB of textures; `streaming-texture-leak` is left out of run.sh (25 min alone) |
 | `dmesg \| grep -c "not done after"` counts old hangs | the ring buffer rolls and the message comes ~2 s late: `hangs.sh` with a timestamp, `sleep 3` first |
 | a scratch script named `dis.py` breaks Python (`import dis`) | don't name helpers after stdlib modules; run tools with `python3 -I` |
-| SuperTux `--renderer opengl` exits ("Missing GL version", GL_MAJOR_VERSION) | 0.6.3: `--renderer sdl` (tools/sgx/supertux-mesa.sh); 0.7.0 (our package): `--renderer opengl20` -- `opengl` is 3.3 core |
-| SuperTux 0.7.0 `--renderer opengl20` runs (fps reported) but the desktop stays on the screen | EGL + vsync + a fullscreen window shows nothing (M42, open): `SDL_VIDEO_X11_FORCE_EGL=0` (GLX) or `vblank_mode=0` |
+| SuperTux `--renderer opengl` exits ("Missing GL version") | it asks an OpenGL 3.3 core context and the driver has 2.1 (M42: the driver's to fix); `sdl` or `opengl20` meanwhile |
+| a screenshot shows the desktop while a fullscreen game runs | the game is page flipped and xwd reads X's front buffer: `python3 tools/desktop/xshot.py --screen out.png` |
 | `apk add` of a big package over ssh: "No space left on device" | the iPad's /tmp is 128 MB of RAM: copy it to /var/tmp (the NFS root) |
 | `perf probe -x libgallium ...` (uprobes) and the renders fail | the driver is Thumb code and the probes break it: remove them (`echo > /sys/kernel/tracing/uprobe_events`); count with `perf record -e raw_syscalls:sys_enter --filter 'id == 54'` (ioctls) instead |
 | `ssh cascadia 'pkill -f NAME ...'` and the ssh session dies | `-f` matches the ssh's own shell, whose command line has NAME: `pkill -x` |
