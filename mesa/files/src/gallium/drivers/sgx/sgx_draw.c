@@ -773,6 +773,18 @@ sgx_batch_bury_vs(struct sgx_context *ctx, struct sgx_vs *vs)
 
 static struct { const char *file; int line; unsigned n; } why[16];
 
+/* what a draw found the render out of, when it was made for want of room
+ * (SGX_DEBUG=fps: "renders from", M42) */
+enum { ROOM_DRAWS, ROOM_HANDLES, ROOM_TEXTURES, ROOM_BYTES, ROOM_N };
+static unsigned room_why[ROOM_N];
+
+static bool
+no_room(unsigned what)
+{
+   room_why[what]++;
+   return true;
+}
+
 /* SGX_TRACE=1: a thread waits for each render and says how long it took
  * from its kick, and how long since the last one ended (debugging speed) */
 #include <pthread.h>
@@ -847,6 +859,12 @@ sgx_batch_why(struct sgx_context *ctx)
                     why[i].line, why[i].n);
       why[i].n = 0;
    }
+   if (room_why[ROOM_DRAWS] + room_why[ROOM_HANDLES] + room_why[ROOM_TEXTURES] + room_why[ROOM_BYTES])
+      snprintf(s + n, sizeof(s) - MIN2(n, sizeof(s)),
+               " (no room for: draws %u, buffers %u, textures %u, bytes %u)",
+               room_why[ROOM_DRAWS], room_why[ROOM_HANDLES], room_why[ROOM_TEXTURES],
+               room_why[ROOM_BYTES]);
+   memset(room_why, 0, sizeof(room_why));
    mesa_logi("sgx:  renders from%s", s);
 }
 
@@ -1145,7 +1163,10 @@ batch_bytes(const struct sgx_batch *b)
  * render's textures stay referenced until it is made, so past
  * SGX_BATCH_TEX_BYTES of them it goes first: a program making, drawing
  * with and deleting textures (piglit's streaming-texture-leak: 5000 of 4
- * MiB) kept them all for one render, and the kernel's pages ran out (M35). */
+ * MiB) kept them all for one render, and the kernel's pages ran out (M35).
+ * Only what the render alone keeps counts (M42): SuperTux 0.7.0's menu
+ * samples ~100 MiB of textures it keeps a frame, three renders when they
+ * all counted. */
 #define SGX_BATCH_TEX_BYTES (48u << 20)
 
 /* the render's entry for texture p as it is sampled now -- its copy then
@@ -1168,8 +1189,24 @@ tex_bytes(struct pipe_resource *p)
    return (r->bo ? r->bo->size : 0) + (r->tw ? r->tw->size : 0);
 }
 
+/* the memory of the render's textures that only the render keeps: those
+ * deleted since (its reference the last) and copies an upload replaced */
+static uint64_t
+dead_tex_bytes(const struct sgx_batch *b)
+{
+   uint64_t n = 0;
+
+   for (unsigned k = 0; k < b->ntex; k++) {
+      if (p_atomic_read(&b->tex[k]->reference.count) == 1)
+         n += tex_bytes(b->tex[k]);
+      else if (b->tex_bo[k] != sgx_resource(b->tex[k])->sampled)
+         n += b->tex_bo[k]->size;
+   }
+   return n;
+}
+
 /* whether these textures fit in the render with the ones it has (one
- * draw's alone always do) */
+ * draw's alone always do, and a draw adding none) */
 static bool
 tex_room(struct sgx_context *ctx, struct pipe_resource **tex, unsigned ntex)
 {
@@ -1179,7 +1216,8 @@ tex_room(struct sgx_context *ctx, struct pipe_resource **tex, unsigned ntex)
    for (unsigned i = 0; i < ntex; i++)
       if (tex_entry(b, tex[i]) == b->ntex)
          n += tex_bytes(tex[i]);
-   return !b->ndraws || n <= SGX_BATCH_TEX_BYTES;
+   return !b->ndraws || n == b->tex_bytes || n <= SGX_BATCH_TEX_BYTES ||
+          dead_tex_bytes(b) <= SGX_BATCH_TEX_BYTES;
 }
 
 /* how many more buffers the render would list for the kernel with these
@@ -1277,7 +1315,8 @@ vtx_reserve(struct sgx_context *ctx, unsigned n)
    uint32_t at = align(b->vat, 16);
 
    if (!bo || at + n > bo->size) {
-      if (b->nvchunks == SGX_BATCH_VCHUNKS) {
+      if (b->nvchunks == SGX_BATCH_VCHUNKS ||
+          b->ntex + b->nbos + b->nvchunks >= SGX_FRAME_MAX_HANDLES) {
          sgx_batch_flush(ctx);
          drop_vchunks(b);
       }
@@ -1429,10 +1468,11 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
    }
    /* room in this render: a draw, its vertices, indices, textures and
     * buffers */
-   if (b->ndraws == sgx_frame_max_draws(screen->frame) ||
-       b->ntex + b->nbos + b->nvchunks + 1 + more_handles(ctx, tex, ntex, v->bos, v->nbos) >
-          SGX_FRAME_MAX_HANDLES ||
-       !tex_room(ctx, tex, ntex) || batch_bytes(b) + nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES) {
+   if ((b->ndraws == sgx_frame_max_draws(screen->frame) && no_room(ROOM_DRAWS)) ||
+       (b->ntex + b->nbos + b->nvchunks + 1 + more_handles(ctx, tex, ntex, v->bos, v->nbos) >
+           SGX_FRAME_MAX_HANDLES && no_room(ROOM_HANDLES)) ||
+       (!tex_room(ctx, tex, ntex) && no_room(ROOM_TEXTURES)) ||
+       (batch_bytes(b) + nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES && no_room(ROOM_BYTES))) {
       sgx_batch_flush(ctx);
       if (nbytes + 2 * nidx > SGX_FRAME_MAX_BYTES ||
           more_handles(ctx, tex, ntex, v->bos, v->nbos) > SGX_FRAME_MAX_HANDLES) {
@@ -1707,9 +1747,11 @@ submit(struct sgx_context *ctx)
       struct sgx_batch_draw *bd;
 
       /* room in this render: a draw, its vertices, its textures */
-      if (b->ndraws == sgx_frame_max_draws(screen->frame) ||
-          b->ntex + b->nbos + more_handles(ctx, tex, ntex, NULL, 0) > SGX_FRAME_MAX_HANDLES ||
-          !tex_room(ctx, tex, ntex) || batch_bytes(b) + n * vf * sizeof(float) > SGX_FRAME_MAX_BYTES)
+      if ((b->ndraws == sgx_frame_max_draws(screen->frame) && no_room(ROOM_DRAWS)) ||
+          (b->ntex + b->nbos + b->nvchunks + more_handles(ctx, tex, ntex, NULL, 0) >
+              SGX_FRAME_MAX_HANDLES && no_room(ROOM_HANDLES)) ||
+          (!tex_room(ctx, tex, ntex) && no_room(ROOM_TEXTURES)) ||
+          (batch_bytes(b) + n * vf * sizeof(float) > SGX_FRAME_MAX_BYTES && no_room(ROOM_BYTES)))
          sgx_batch_flush(ctx);
       if (!grow((void **)&b->verts, &b->maxfloats, b->nfloats + n * vf, sizeof(float)) ||
           !grow((void **)&b->sa, &b->maxsa, b->nsa + nsa, sizeof(uint32_t)))
