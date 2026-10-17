@@ -608,6 +608,20 @@ fs_for_draw(struct sgx_context *ctx)
          key.alpha_func = rt->alpha_func;
          key.alpha_src = rt->alpha_src_factor;
          key.alpha_dst = rt->alpha_dst_factor;
+         /* a target without alpha (RG8, R8, BGRX8): its alpha is 1
+          * (gallium's rule; M43 -- the background load of RG8 leaves 0) */
+         if (ctx->fb.nr_cbufs && ctx->fb.cbufs[0].texture &&
+             !util_format_has_alpha(ctx->fb.cbufs[0].format)) {
+            uint8_t *f[4] = { &key.rgb_src, &key.rgb_dst, &key.alpha_src, &key.alpha_dst };
+
+            for (unsigned i = 0; i < 4; i++) {
+               if (*f[i] == PIPE_BLENDFACTOR_DST_ALPHA)
+                  *f[i] = PIPE_BLENDFACTOR_ONE;
+               else if (*f[i] == PIPE_BLENDFACTOR_INV_DST_ALPHA ||
+                        *f[i] == PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE)
+                  *f[i] = PIPE_BLENDFACTOR_ZERO;
+            }
+         }
       }
    }
    /* GL's logic ops: the program's too, on the colour and the tile's as

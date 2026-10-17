@@ -6,7 +6,10 @@
  * them, filtered), brought into [0, 1] by the program -- value * scale +
  * bias -- so that values past [0, 1] can be seen on an RGBA8 target, and
  * read back against what GL says the format holds.  A format the context
- * has not is said, not counted.
+ * has not is said, not counted.  And render targets of other formats than
+ * RGBA8 (R8, RG8: ARB_texture_rg): cleared, then -- a render later, its
+ * tiles loaded back from memory -- half drawn over, then added to with
+ * blending, read back and sampled.
  *
  *   sgx-gl glfmt [CASE]        (CASE: a name's start; all by default)
  */
@@ -105,6 +108,31 @@ static int
 to8(float x)
 {
 	return (int)(fminf(fmaxf(x, 0), 1) * 255 + 0.5f);
+}
+
+static GLuint
+compile(const char *vs, const char *fs)
+{
+	const char *src[2] = { vs, fs };
+	GLuint p = glCreateProgram();
+	char log[512];
+	GLint ok;
+
+	for (int i = 0; i < 2; i++) {
+		GLuint s = glCreateShader(i ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+
+		glShaderSource(s, 1, &src[i], NULL);
+		glCompileShader(s);
+		glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+		if (!ok) {
+			glGetShaderInfoLog(s, sizeof(log), NULL, log);
+			fprintf(stderr, "glfmt: %s\n", log);
+		}
+		glAttachShader(p, s);
+	}
+	glBindAttribLocation(p, 0, "a_position");
+	glLinkProgram(p);
+	return p;
 }
 
 static GLuint
@@ -242,6 +270,186 @@ run(const struct fmt_case *f, const char *what, const float t[4][4], float scale
 	       px[4 * at], px[4 * at + 1], px[4 * at + 2], px[4 * at + 3]);
 }
 
+/* the colour a target of this many channels keeps of rgba, as ReadPixels
+ * hands it back (missing channels 0, alpha 1) */
+static void
+kept_target(int channels, const float rgba[4], float out[4])
+{
+	for (int c = 0; c < 3; c++)
+		out[c] = c < channels ? roundf(rgba[c] * 255) / 255 : 0;
+	out[3] = channels == 4 ? roundf(rgba[3] * 255) / 255 : 1;
+}
+
+/* GLFMT_DEBUG: a target's left and right pixel after each step */
+static void
+step(const char *what)
+{
+	uint8_t l[4], r[4];
+
+	if (getenv("GLFMT_DUMP")) {
+		static uint8_t all[W * H * 4];
+
+		glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, all);
+		printf("  %s, by row (. as cleared, # as drawn, x mixed):\n   ", what);
+		for (int y = 0; y < H; y++) {
+			int n = 0;
+
+			for (int x = 0; x < W; x++)
+				n += all[4 * (y * W + x)] == 0x99;
+			putchar(n == 0 ? '.' : n == W ? '#' : 'x');
+		}
+		printf("\n   row 0's first 32 pixels' R: ");
+		for (int x = 0; x < 32; x++)
+			printf("%c", all[4 * x] == 0x99 ? '#' : '.');
+		printf("\n");
+		printf("  %s, R G of rows 0, 1, 31, 32, 63 (every 4th pixel):\n", what);
+		for (int y = 0; y < H; y++) {
+			if (y != 0 && y != 1 && y != 31 && y != 32 && y != 63)
+				continue;
+			printf("   %2d:", y);
+			for (int x = 0; x < W; x += 4)
+				printf(" %02x%02x", all[4 * (y * W + x)], all[4 * (y * W + x) + 1]);
+			printf("\n");
+		}
+	}
+	if (!getenv("GLFMT_DEBUG"))
+		return;
+	glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, l);
+	glReadPixels(W - 1, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, r);
+	printf("  %-12s left %3d %3d %3d %3d  right %3d %3d %3d %3d\n", what, l[0], l[1], l[2], l[3],
+	       r[0], r[1], r[2], r[3]);
+}
+
+/* A render target of the format: cleared, a render later its right half
+ * drawn, then a quad added over all of it (blending ONE, ONE) */
+static void
+target(const char *name, GLenum ifmt, GLenum fmt, int channels, GLuint fbo_back)
+{
+	static const char *vs =
+		"#version 120\nattribute vec4 a_position;\n"
+		"void main() { gl_Position = a_position; }\n";
+	static const char *fs =
+		"#version 120\nuniform vec4 colour;\n"
+		"void main() { gl_FragColor = colour; }\n";
+	static const float half_quad[] = { 0, -1, 1, -1, 1, 1, 0, -1, 1, 1, 0, 1 };
+	const float clear[4] = { 0.25f, 0.5f, 0.75f, 1 }, drawn[4] = { 0.6f, 0.2f, 0.1f, 0.5f };
+	const float added[4] = { 0.125f, 0.25f, 0.5f, 0 }, scaled[4] = { 0.5f, 0.75f, 0.25f, 1 };
+	char full[64];
+	GLuint tex, fbo, p;
+	int bad = 0, at = -1;
+
+	snprintf(full, sizeof(full), "target %s", name);
+	if (only && strncmp(full, only, strlen(only)))
+		return;
+	while (glGetError())
+		;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, ifmt, W, H, 0, fmt, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	if (glGetError() || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		printf("%-30s not here\n", full);
+		skipped++;
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo_back);
+		return;
+	}
+	p = compile(vs, fs);
+	glUseProgram(p);
+	glClearColor(clear[0], clear[1], clear[2], clear[3]);
+	glClear(GL_COLOR_BUFFER_BIT);
+	if (!getenv("GLFMT_ONE_RENDER")) {
+		glFinish();
+		step("cleared");
+	}
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, half_quad);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, drawn);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glFinish();
+	step("half drawn");
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, added);
+	quad();
+	glFinish();
+	step("added");
+	/* and a render later times the target's alpha (1 where it has none:
+	 * the background load's) */
+	glBlendFunc(GL_DST_ALPHA, GL_ZERO);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, scaled);
+	quad();
+	glDisable(GL_BLEND);
+	step("dst alpha");
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	for (int i = 0; i < W * H; i++) {
+		float k[4], want[4];
+		int off = 0;
+
+		kept_target(channels, (i % W) < W / 2 ? clear : drawn, k);
+		for (int c = 0; c < 4; c++)
+			want[c] = c < channels ? k[c] + added[c] : k[c];
+		/* (the target's alpha: what it keeps, 1 if none) */
+		for (int c = 0; c < 4; c++)
+			want[c] = c < channels || (c == 3 && channels == 4) ?
+			          roundf(scaled[c] * 255) / 255 * (channels == 4 ? fminf(want[3], 1) : 1) :
+			          want[c];
+		for (int c = 0; c < 4; c++)
+			off |= abs(px[4 * i + c] - to8(want[c])) > 2;
+		if (off && at < 0)
+			at = i;
+		bad += off;
+	}
+	cases++;
+	if (bad) {
+		failed++;
+		printf("%-30s WRONG: %d pixels, the first at %d, %d: %d %d %d %d\n", full, bad, at % W,
+		       at / W, px[4 * at], px[4 * at + 1], px[4 * at + 2], px[4 * at + 3]);
+	} else {
+		printf("%-30s ok\n", full);
+	}
+	/* and sampled: what was drawn, through the other program, to RGBA8 */
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo_back);
+	glUseProgram(prog);
+	glUniform4f(glGetUniformLocation(prog, "scale"), 1, 1, 1, 1);
+	glUniform4f(glGetUniformLocation(prog, "bias"), 0, 0, 0, 0);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	quad();
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	bad = 0, at = -1;
+	for (int i = 0; i < W * H; i++) {
+		float k[4], want[4];
+		int off = 0;
+
+		kept_target(channels, (i % W) < W / 2 ? clear : drawn, k);
+		for (int c = 0; c < 4; c++)
+			want[c] = c < channels ? k[c] + added[c] : k[c];
+		for (int c = 0; c < 4; c++)
+			want[c] = c < channels || (c == 3 && channels == 4) ?
+			          roundf(scaled[c] * 255) / 255 * (channels == 4 ? fminf(want[3], 1) : 1) :
+			          want[c];
+		for (int c = 0; c < 4; c++)
+			off |= abs(px[4 * i + c] - to8(want[c])) > 2;
+		if (off && at < 0)
+			at = i;
+		bad += off;
+	}
+	cases++;
+	if (bad) {
+		failed++;
+		printf("%-30s WRONG: %d pixels, the first at %d, %d: %d %d %d %d\n", "  sampled", bad,
+		       at % W, at / W, px[4 * at], px[4 * at + 1], px[4 * at + 2], px[4 * at + 3]);
+	} else {
+		printf("%-30s ok\n", "  sampled");
+	}
+	glDeleteFramebuffers(1, &fbo);
+	glDeleteTextures(1, &tex);
+	glDeleteProgram(p);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -308,6 +516,9 @@ main(int argc, char **argv)
 			run(f, "filtered", unit, 1, 0, 1, 3);
 		}
 	}
+	target("rgba8", GL_RGBA8, GL_RGBA, 4, fbo);
+	target("r8", GL_R8, GL_RED, 1, fbo);
+	target("rg8", GL_RG8, GL_RG, 2, fbo);
 	printf("%d of %d cases right (%d formats not here)\n", cases - failed, cases, skipped);
 	return failed ? 1 : 0;
 }

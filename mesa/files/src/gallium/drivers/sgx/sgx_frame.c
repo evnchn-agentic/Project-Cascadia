@@ -349,7 +349,60 @@ usse_limm_r(unsigned reg, uint32_t imm)
 
 struct sgx_eot {
    uint32_t va, w, h, stride;   /* the render target it writes */
+   /* (M43) its format: the pixel back end's word, a pixel's bytes, and the
+    * background object's load of it as a texture's format and swizzle */
+   uint32_t pbe, bytes, bg_fmt, bg_swizzle;
 };
+
+/* The render target formats (M43).  The pixel back end's format words are
+ * GXM's colour formats (SceGxmColorFormat: the base format in bits 31:28
+ * and 24:23 -- U8 0x80800000, U8U8 0xb0800000 -- its swizzle in 21:20)
+ * with bit 16 set, as all of iOS's captures have it (m25..m28: 8888
+ * 0x00110000, 565 0x34110000, 4444 0x54110000, 5551 0x44110000, half
+ * floats 0x07010000).  Bit 26 there is GXM's tiled surface (each 32 x 32
+ * tile's pixels one after another: glfmt's half quad landed in whole
+ * rows); linear here, the pixel's size the format's.  The tile holds the
+ * program's colour as RGBA bytes whatever the target, and the PBE takes
+ * the target's channels from it (R, then G); the background object loads
+ * the target's texels back into the same places, alpha 1 where the target
+ * has none.  SGX_PBE_<FMT>, SGX_BG_<FMT> (format << 8 | swizzle): to try
+ * others. */
+static bool
+rt_format(enum pipe_format format, struct sgx_eot *to)
+{
+   static const struct {
+      enum pipe_format format;
+      const char *name;
+      uint32_t pbe, bytes, bg_fmt, bg_swizzle;
+   } fmts[] = {
+      { PIPE_FORMAT_B8G8R8A8_UNORM, "BGRA8", 0x00110000, 4, 0x0c, 1 },
+      { PIPE_FORMAT_B8G8R8X8_UNORM, "BGRX8", 0x00110000, 4, 0x0c, 1 },
+      { PIPE_FORMAT_R8_UNORM, "R8", 0x80810000, 1, 0x00, 5 },     /* U8, R; L8's 1RRR */
+      { PIPE_FORMAT_R8G8_UNORM, "RG8", 0xb0810000, 2, 0x07, 0 },  /* U8U8, GR */
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(fmts); i++) {
+      char name[32];
+      const char *e;
+
+      if (fmts[i].format != format)
+         continue;
+      to->pbe = fmts[i].pbe;
+      to->bytes = fmts[i].bytes;
+      to->bg_fmt = fmts[i].bg_fmt;
+      to->bg_swizzle = fmts[i].bg_swizzle;
+      snprintf(name, sizeof(name), "SGX_PBE_%s", fmts[i].name);
+      if ((e = getenv(name)))
+         to->pbe = strtoul(e, NULL, 0);
+      snprintf(name, sizeof(name), "SGX_BG_%s", fmts[i].name);
+      if ((e = getenv(name))) {
+         to->bg_fmt = strtoul(e, NULL, 0) >> 8 & 0x1f;
+         to->bg_swizzle = strtoul(e, NULL, 0) & 7;
+      }
+      return true;
+   }
+   return false;
+}
 
 struct rt_set {
    struct sgx_rt rt;
@@ -1268,12 +1321,15 @@ target_eot(const struct sgx_frame_target *t)
 {
    const struct sgx_resource *r = t->res;
    unsigned w = u_minify(r->base.width0, t->level), h = u_minify(r->base.height0, t->level);
-
-   return (struct sgx_eot){
+   struct sgx_eot to = {
       .va = r->bo->va + r->offset[t->level] + t->layer * r->layer_size[t->level],
       .w = t->w ? MIN2(t->w, w) : w, .h = t->h ? MIN2(t->h, h) : h,
       .stride = r->stride[t->level],
    };
+
+   if (!rt_format(r->base.format, &to))
+      rt_format(PIPE_FORMAT_B8G8R8A8_UNORM, &to);
+   return to;
 }
 
 bool
@@ -1285,8 +1341,7 @@ sgx_frame_can_render(struct sgx_frame *f, const struct sgx_frame_target *t)
    if (!f || !t->res->bo || t->level > p->last_level || t->layer >= p->array_size ||
        (p->target != PIPE_TEXTURE_2D && p->target != PIPE_TEXTURE_CUBE &&
         p->target != PIPE_TEXTURE_RECT && p->target != PIPE_TEXTURE_1D) ||
-       (p->format != PIPE_FORMAT_B8G8R8A8_UNORM && p->format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
-       p->nr_samples > 1)
+       !rt_format(p->format, &(struct sgx_eot){ 0 }) || p->nr_samples > 1)
       return false;
    to = target_eot(t);
    return to.w <= SGX_RT_MAX_SIZE && to.h <= SGX_RT_MAX_SIZE &&
@@ -1589,7 +1644,7 @@ static uint32_t
 eot_program(struct sgx_frame *f, const struct sgx_eot *want)
 {
    const uint32_t pbe[6] = {
-      0x00110000, want->va, want->stride / 4 / 2 - 1, 0, 0,
+      want->pbe, want->va, want->stride / want->bytes / 2 - 1, 0, 0,
       (want->h - 1) << 12 | (want->w - 1),
    };
    uint64_t prog[11];
@@ -1957,12 +2012,13 @@ begin_render(struct sgx_frame *f, const struct sgx_frame_target *t, struct sgx_e
       /* where the pack's own end of tile writes, if the kernel does not say */
       to.va = f->dev->fb_va ? f->dev->fb_va : 0x90000000u;
       to.stride = f->dev->fb_stride ? f->dev->fb_stride : f->w * 4;
+      rt_format(PIPE_FORMAT_B8G8R8A8_UNORM, &to);
    }
    eot = eot_program(f, &to);
    bg[0] = (to.stride / 4 / 4 - 2) << 16 | 0x0e90;
-   bg[1] = 0xcc000000 | (to.w - 1) << 12 | (to.h - 1);
+   bg[1] = 0xc0000000 | to.bg_fmt << 24 | (to.w - 1) << 12 | (to.h - 1);
    bg[2] = to.va;
-   bg[3] = 0x10000000;
+   bg[3] = to.bg_swizzle << 28;
    d0 = doutu(f, eot);
 
    if (o) {

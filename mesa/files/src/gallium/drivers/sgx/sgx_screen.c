@@ -124,7 +124,11 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    /* what the pixel back end writes linear (the framebuffer's format) */
    if (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET |
                 PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)) {
-      if (format != PIPE_FORMAT_B8G8R8A8_UNORM && format != PIPE_FORMAT_B8G8R8X8_UNORM)
+      /* (M43: R and RG of bytes too -- sgx_frame.c's rt_format; not for
+       * the screen) */
+      if (format != PIPE_FORMAT_B8G8R8A8_UNORM && format != PIPE_FORMAT_B8G8R8X8_UNORM &&
+          ((usage & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)) ||
+           (format != PIPE_FORMAT_R8_UNORM && format != PIPE_FORMAT_R8G8_UNORM)))
          return false;
    }
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
