@@ -3171,11 +3171,54 @@ aligned now (the fetch reads dwords; applications' buffers have any
 offset). dEQP's vertex_arrays, draw, buffer, attribute_location,
 default_vertex_attrib, clipping and rasterization as before.
 
-**Towards OpenGL 3.** glxinfo: GL 2.1, GLSL 1.20; of the 39 extensions
-Mesa wants for 3.0-3.3 (`compute_version()`, src/mesa/main/version.c)
-the driver has 10. 3.0 also wants GLSL 1.30, 4 colour attachments and 4
-samples (or Mesa's fake MSAA). What the SGX can do for each, and in which
-order, is the next milestone's plan.
+### Towards OpenGL 3: the plan
+
+Programs ask for OpenGL 3 more and more (SuperTux 0.7.0's own renderer is
+3.3 core; SDL's EGL path asks a GL 3.0 query), and the answer is the
+driver's. glxinfo: GL 2.1, GLSL 1.20, no core profile. Mesa's
+`compute_version()` (src/mesa/main/version.c) wants for 3.0 GLSL 1.30, 4
+colour attachments, 4 samples (or its fake MSAA) and 18 extensions; 3.1,
+3.2 and 3.3 another 7, 8 and 8 (3.2's GLSL 1.50 brings geometry shaders).
+The driver has 10 of the 39: draw_elements_base_vertex,
+explicit_attrib_location, fragment_coord_conventions, half_float_vertex,
+map_buffer_range, sync, texture_rectangle, provoking_vertex, texture_sRGB,
+vertex_array_bgra. Today it is a GLES 2 part's driver: one render target,
+no 3D or array textures, float vertex buffers only, 8 varyings.
+
+What the SGX543 has for the rest (from what is known: PS Vita's GXM on the
+same core, iOS's captures, this driver) and what it does not -- where it
+does not, Mesa's own way for such parts (the draw module on the CPU, a
+conversion at upload, a shader doing the fixed function's work) is the
+answer, as r300, i915 and lima do it:
+
+| | what | how, on the SGX |
+|---|---|---|
+| 1 | ARB_framebuffer_object (`mixed_framebuffer_sizes`) | renders over the attachments' common area; the depth buffer's tiles by its own size |
+| 1 | ARB_texture_rg, EXT_texture_snorm | GXM's U8, U8U8, S8 formats and swizzles |
+| 1 | EXT_texture_swizzle | the texture state's swizzle (word 3) |
+| 1 | ARB_texture_float, half floats, ARB_color_buffer_float | F16x4 textures and the PBE's half float target known; F32 formats to capture; clamping in the program |
+| 1 | EXT_packed_float, EXT_texture_shared_exponent, RGTC | converted at upload (to F16, to R8/RG8) |
+| 1 | ARB_depth_buffer_float | the ISP keeps depth as F32 already |
+| 1 | EXT_framebuffer_sRGB | the program converts its output (sRGB textures: GXM's gamma mode, M37) |
+| 1 | ARB_vertex_type_2_10_10_10_rev, other vertex formats | repacked by the CPU, as client arrays are (M26) |
+| 1 | ARB_draw_instanced, ARB_instanced_arrays | a draw an instance, the instance's attributes as constants |
+| 1 | NV_primitive_restart | the CPU splits the indices |
+| 1 | NV_conditional_render | the CPU waits for the query |
+| 1 | ARB_timer_query | the kernel's render times |
+| 1 | ARB_uniform_buffer_object | uniforms in memory already (M32, VLDST) |
+| 1 | ARB_blend_func_extended, ARB_depth_clamp | blending is the program's anyway; depth clamped in it |
+| 2 | GLSL 1.30-3.30 | the compiler: integers and bit operations (the USSE has them), division by NIR's lowering, `texelFetch`, `textureSize`, `textureLod` in pixel programs (SMP's LOD mode, M33), `gl_VertexID`, `switch` |
+| 2 | EXT_texture_integer, rgb10_a2ui | integer sampling: GXM's U16/U32 formats, to capture; integer targets through the program's packing |
+| 3 | 4 colour attachments, EXT_draw_buffers2 | the PBE writing more than one surface at the tile's end: to find (capture or try); else a pass a target |
+| 3 | 4 samples | iOS has APPLE_framebuffer_multisample on the A5: hardware MSAA, to capture |
+| 3 | EXT_texture_array (and GL 1.2's 3D textures) | a layer's texture state chosen by the program (if SMP takes its state from registers) -- else layers in one image, the program addressing them |
+| 3 | EXT_transform_feedback | vertex programs on the CPU (the draw module's stream output) while it is on |
+| 4 | geometry shaders (3.2), multisample textures, seamless cube maps, texture buffers | the draw module again; the rest to find |
+
+Order: the first rows (each small, each with its piglit and dEQP groups)
+make M43; the compiler M44; then the hardware to find (several targets,
+MSAA, arrays) with an iOS capture for each; 3.0, then 3.3 core -- SuperTux's
+`--renderer opengl` as it is the measure of the last.
 
 ## Testing, without and with the device
 
