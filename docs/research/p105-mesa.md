@@ -3299,6 +3299,16 @@ passes; texture formats 109 -> 139; with R8 and RG8 targets, the
 texture_rg, RGTC, FBO, blending and texwrap groups 113 -> 219 (and
 `fbo-blending-formats` passes); nothing that passed fails.
 
+**A cube map's faces.** dEQP found the half float copy's cube maps wrong
+(`random_teximage2d.cube_7`, an 8 x 8 one of GL_ALPHA half floats): the
+faces' spacing rule -- 2 KiB aligned from 16 x 16 (M28, glmip) -- is in
+bytes: aligned once level 0 is 512 bytes or more, 16 x 16 of four-byte
+texels, 8 x 8 of eight (`SGX_CUBE8_*` tried 1 KiB, 4 KiB and other sizes:
+only this passes), 32 x 32 of one -- which is why one-byte cube maps
+(dEQP's size.cube.16x16_l8) had their faces elsewhere and were copied as
+RGBA8; they are as they are now, and pass. dEQP-GLES2 whole: as at M38
+but for that case, fixed (texture.specification 192 of 192).
+
 **Gaps the new tests ran into** (they had been skipped): 3D textures --
 GL 1.2's, not there at all (`fbo-incomplete`, `fbo-generatemipmap-3d`);
 the border colour (every `texwrap formats bordercolor`); `gl_FragDepth`

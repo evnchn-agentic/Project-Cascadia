@@ -1344,6 +1344,17 @@ frames and touches in dmesg; `z2-boot -p N -N` reads the frames itself, without 
   `gdb -ex 'break _mesa_error'` (`sdl2-dbg` is on the iPad for SDL's
   names). A fullscreen game flipped (vsync): `xshot.py --screen` (xwd
   shows the desktop under it).
+- M43 (towards OpenGL 3, p105-mesa.md's plan): ARB_framebuffer_object,
+  EXT_texture_swizzle, ARB_texture_float, EXT_texture_snorm,
+  EXT_texture_shared_exponent, ARB_texture_rg. `sgx-gl glfmt` (formats
+  sampled and filtered, R8/RG8 targets). Each item: piglit's groups, base
+  against new -- `/root/piglit/run.sh NAME-base -t GROUP ...` then
+  `WRAP="env SGX_MESA=/root/sgx-mesa-rel /root/sgx-dev" /root/piglit/run.sh
+  NAME -t GROUP ...`, and `comm` of `pigsum.py DIR pass` lists. Render
+  target formats: `rt_format()` in sgx_frame.c (GXM colour formats, bit 26
+  = tiled), `SGX_PBE_R8=0x...` to try words. Don't rebuild
+  `/root/sgx-mesa-rel` while a piglit run uses it (`mesa/devbuild.sh`
+  without `release` builds `/root/sgx-mesa-cur` instead).
 - iOS's GL driver as the oracle: `bash tools/shadercap.sh` with the iPad in iOS
   (corpus + OpenGL ES 1 cases, render commands logged), then
   `python3 tools/iosgpu/corpus.py logs/ios/corpus/DATE [--pds|--state|--own] [CASE]`.
