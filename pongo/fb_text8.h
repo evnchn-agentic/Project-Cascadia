@@ -5,13 +5,13 @@
 #include "font8x8.h"
 
 #ifndef FB_TEXT_W
-#define FB_TEXT_W 1920
+#define FB_TEXT_W 1280
 #endif
 #ifndef FB_TEXT_H
-#define FB_TEXT_H 1080
+#define FB_TEXT_H 720
 #endif
 #ifndef FB_TEXT_STRIDE
-#define FB_TEXT_STRIDE 7680
+#define FB_TEXT_STRIDE 5120
 #endif
 #ifndef FB_TEXT_SCANOUT
 #define FB_TEXT_SCANOUT 0x9F570000u

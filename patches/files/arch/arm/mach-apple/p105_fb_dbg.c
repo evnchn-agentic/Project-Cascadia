@@ -2,7 +2,7 @@
 /*
  * P105AP early FB text debug (phys identity map + WC virt after map_io).
  *
- * J33iAP: assumed HDMI scanout 0x9F570000, 1920x1080, stride 7680, BGRA.
+ * J33iAP: assumed HDMI scanout 0x9F570000, 1280x720, stride 5120, BGRA.
  *
  * Lifetime: not __init (rest_init can race free_initmem).  Phys identity
  * writes are only safe while early maps live — call p105_fb_dbg_shutdown()
@@ -18,9 +18,9 @@
 #include "p105_fb_dbg.h"
 
 #define P105_FB_PHYS	0x9f570000ul
-#define P105_FB_WIDTH	1920
-#define P105_FB_HEIGHT	1080
-#define P105_FB_STRIDE	7680
+#define P105_FB_WIDTH	1280
+#define P105_FB_HEIGHT	720
+#define P105_FB_STRIDE	5120
 #define P105_FB_VIRT	0xF0000000UL
 
 #define P105_FG		0xffffffffu

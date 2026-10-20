@@ -8,7 +8,7 @@
  * over ssh from iOS 8.4.4).  What differs:
  *   - one Cortex-A9, no cpu1;
  *   - the scanout is HDMI through rgbout (0x3a200000), not a panel: the
- *     live ADT /vram is 0x9F570000 + 0xA8C000, iOS runs it at 1920x1080;
+ *     live ADT /vram is 0x9F570000 + 0xA8C000, iOS runs 1080p, iBoot 720p;
  *   - DRAM is 0x80000000 + 0x1F570000 (hw.memsize), /vram right above it;
  *   - the boot console is uart3 (0x32800000).  uart0 talks to the IR/LED
  *     MCU here, so nothing in this file touches it.
@@ -54,13 +54,13 @@
 	};
 
 	/* iBoot's HDMI scanout.  Base and stride are patched by the staging
-	 * loader from rgbout; the 1920x1080 geometry is an assumption. */
+	 * loader from rgbout; 1280x720 is what iBoot Recovery shows over HDMI. */
 	framebuffer0: framebuffer@9f570000 {
 		compatible = "simple-framebuffer";
 		reg = <0x9f570000 0xa8c000>;
-		width = <1920>;
-		height = <1080>;
-		stride = <7680>;
+		width = <1280>;
+		height = <720>;
+		stride = <5120>;
 		format = "a8r8g8b8";
 		memory-region = <&fb_region>;
 		status = "okay";
