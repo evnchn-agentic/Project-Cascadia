@@ -38,6 +38,13 @@ DONE_FLAG = 0x9FF48BB0
 USB_CONTINUE = 0x9FF201A4
 PKT = 0x8000
 
+# Same iBoot-2261.30.37 function, relocated.  J33i = AppleTV3,2 12H847 iBEC;
+# offsets found by matching the p105 hook site instruction for instruction.
+BOARDS = {
+    "j33i": dict(HOOK_OFF=0x213A8, TRAMPOLINE_OFF=0x4090E, CACHE_FLUSH=0x9FF1EEAC,
+                 DONE_FLAG=0x9FF45A30, USB_CONTINUE=0x9FF1E368),
+}
+
 
 def iboot_base(data: bytes) -> int:
     import struct
@@ -200,7 +207,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", type=Path)
     ap.add_argument("output", type=Path)
+    ap.add_argument("--board", choices=sorted(BOARDS))
     args = ap.parse_args()
+    if args.board:
+        globals().update(BOARDS[args.board])
 
     data = bytearray(args.input.read_bytes())
     base = iboot_base(data)
