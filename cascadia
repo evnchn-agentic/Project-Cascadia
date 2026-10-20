@@ -23,6 +23,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOARD="${BOARD:-p105ap}"   # j33iap = AppleTV3,2
 IMAGE="${IMAGE:-cascadia-build}"
 cd "$ROOT"
 
@@ -194,7 +195,7 @@ cmd_doctor() {
          note "         git clone https://github.com/LukeZGD/Legacy-iOS-Kit.git ~/Legacy-iOS-Kit"; fi
 
     say "tree"
-    for p in build/linux/Makefile build/initramfs-root/init dtb/p105ap.dtb; do
+    for p in build/linux/Makefile build/initramfs-root/init dtb/$BOARD.dtb; do
         # The hint is picked outside $(...): macOS's /bin/bash 3.2 cannot parse
         # a case statement inside a command substitution.
         if [ -e "$p" ]; then note "ok:      $p"
@@ -239,20 +240,20 @@ cmd_build() {
     say "1/6 device tree"
     # rm first: dtc is not a make target here, so a stale .dtb would just be
     # reused and an edit to the .dts would silently never reach the device.
-    rm -f "$ROOT/dtb/p105ap.dtb"; mkdir -p "$ROOT/dtb"
+    rm -f "$ROOT/dtb/$BOARD.dtb"; mkdir -p "$ROOT/dtb"
     # Capture rather than pipe: a pipeline hands back the last command's status,
     # so a docker failure here used to surface as the far less useful "dtc
     # produced no dtb" with the real error scrolled past.
-    if ! out=$(in_docker "dtc -I dts -O dtb -f dts/p105ap.dts -o dtb/p105ap.dtb" 2>&1); then
+    if ! out=$(in_docker "dtc -I dts -O dtb -f dts/$BOARD.dts -o dtb/$BOARD.dtb" 2>&1); then
         printf '%s\n' "$out" >&2
         fail "dtc failed -- see above"
     fi
     printf '%s\n' "$out" | grep -v '^$' | tail -5 || true
-    [ -s "$ROOT/dtb/p105ap.dtb" ] || fail "dtc ran but produced no dtb"
+    [ -s "$ROOT/dtb/$BOARD.dtb" ] || fail "dtc ran but produced no dtb"
     for s in g_cdc.host_addr g_cdc.dev_addr; do
-        LC_ALL=C grep -aFq "$s" "$ROOT/dtb/p105ap.dtb" || fail "$s missing from the dtb bootargs"
+        LC_ALL=C grep -aFq "$s" "$ROOT/dtb/$BOARD.dtb" || fail "$s missing from the dtb bootargs"
     done
-    LC_ALL=C grep -aFq initcall_debug "$ROOT/dtb/p105ap.dtb" && fail "dtb has initcall_debug; drop it from bootargs"
+    LC_ALL=C grep -aFq initcall_debug "$ROOT/dtb/$BOARD.dtb" && fail "dtb has initcall_debug; drop it from bootargs"
     note "ok: fresh dtb, gadget MACs pinned"
 
     say "2/6 initramfs extras"
@@ -461,8 +462,8 @@ so this is a file in build/initramfs-root owned by some third uid."
     done
 
     say "6/6 bundle"
-    cat "$ROOT/build/linux/arch/arm/boot/zImage" "$ROOT/dtb/p105ap.dtb" > "$ROOT/output/zImage-dtb"
-    want=$(( $(filesize "$ROOT/build/linux/arch/arm/boot/zImage") + $(filesize "$ROOT/dtb/p105ap.dtb") ))
+    cat "$ROOT/build/linux/arch/arm/boot/zImage" "$ROOT/dtb/$BOARD.dtb" > "$ROOT/output/zImage-dtb"
+    want=$(( $(filesize "$ROOT/build/linux/arch/arm/boot/zImage") + $(filesize "$ROOT/dtb/$BOARD.dtb") ))
     got=$(filesize "$ROOT/output/zImage-dtb")
     [ "$want" = "$got" ] || fail "zImage-dtb is $got bytes, expected $want"
     in_docker "bash build-bundle.sh 2>&1 | tail -5"

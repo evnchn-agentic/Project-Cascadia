@@ -1,0 +1,174 @@
+/dts-v1/;
+
+/*
+ * Apple TV 3rd generation, Rev A: AppleTV3,2 / J33iAP / S5L8947X (one core).
+ *
+ * Derived from p105ap.dts: the SoC blocks used here sit at the same
+ * addresses on J33i (decrypted 12H847 ADT, and the live IODeviceTree read
+ * over ssh from iOS 8.4.4).  What differs:
+ *   - one Cortex-A9, no cpu1;
+ *   - the scanout is HDMI through rgbout (0x3a200000), not a panel: the
+ *     live ADT /vram is 0x9F570000 + 0xA8C000, iOS runs it at 1920x1080;
+ *   - DRAM is 0x80000000 + 0x1F570000 (hw.memsize), /vram right above it;
+ *   - the boot console is uart3 (0x32800000).  uart0 talks to the IR/LED
+ *     MCU here, so nothing in this file touches it.
+ * Not described yet: Ethernet (0xb000000), Wi-Fi (HSIC port 2), HDMI audio.
+ */
+
+/ {
+	compatible = "apple,j33iap", "apple,s5l8947x", "apple,s5l8940x", "apple,arm";
+	model = "Apple TV (AppleTV3,2)";
+	#address-cells = <1>;
+	#size-cells = <1>;
+	interrupt-parent = <&aic>;
+
+	aliases {
+		serial0 = &uart3;
+	};
+
+	chosen {
+		bootargs = "earlycon=s3c6400,0x32800000 keep_bootcon lpj=5000000 root=/dev/ram0 rw rootwait panic=10 loglevel=8 ignore_loglevel g_cdc.host_addr=02:10:5a:05:00:01 g_cdc.dev_addr=02:10:5a:05:00:02";
+		linux,initrd-start = <0x88000000>;
+		linux,initrd-end   = <0x88000000>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x1f570000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		fb_region: framebuffer@9f570000 {
+			reg = <0x9f570000 0xa8c000>;
+			no-map;
+		};
+
+		cpu_reset_page: cpu-reset@80000000 {
+			reg = <0x80000000 0x1000>;
+			no-map;
+		};
+	};
+
+	/* iBoot's HDMI scanout.  Base and stride are patched by the staging
+	 * loader from rgbout; the 1920x1080 geometry is an assumption. */
+	framebuffer0: framebuffer@9f570000 {
+		compatible = "simple-framebuffer";
+		reg = <0x9f570000 0xa8c000>;
+		width = <1920>;
+		height = <1080>;
+		stride = <7680>;
+		format = "a8r8g8b8";
+		memory-region = <&fb_region>;
+		status = "okay";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		apple,cpu-reset-page = <&cpu_reset_page>;
+
+		cpu0: cpu@a00 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a9";
+			reg = <0xa00>;
+		};
+	};
+
+	l2: cache-controller@3e000000 {
+		compatible = "arm,pl310-cache";
+		reg = <0x3e000000 0x1000>, <0x3fd00000 0x2000>;
+		cache-unified;
+		cache-level = <2>;
+		arm,tag-latency = <2 2 1>;
+		arm,data-latency = <3 2 1>;
+		arm,shared-override;
+		arm,full-line-zero-disable;
+		arm,dynamic-clock-gating = <1>;
+		arm,standby-mode = <0>;
+		status = "okay";
+	};
+
+	uart_clk: clock-24000000 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+
+	soc: soc@30000000 {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x30000000 0x10000000>;
+
+		aic: interrupt-controller@f200000 {
+			compatible = "aic,1";
+			reg = <0xf200000 0x10000>;
+			interrupt-controller;
+			#interrupt-cells = <1>;
+			#address-cells = <0>;
+			apple,main-cpus = <2>;
+		};
+
+		gpio: gpio@fa00000 {
+			compatible = "apple,s5l8940x-gpio";
+			reg = <0xfa00000 0x100000>;
+			interrupts = <119>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			#address-cells = <0>;
+			pin-count = <224>;
+			interrupt-groups = <1>;
+			status = "okay";
+		};
+
+		uart3: serial@2800000 {
+			compatible = "apple,s5l-uart", "samsung,s3c6400-uart";
+			reg = <0x2800000 0x1000>;
+			interrupts = <24>;
+			clocks = <&uart_clk>, <&uart_clk>;
+			clock-names = "uart", "clk_uart_baud0";
+			status = "disabled";
+		};
+
+		wdt: timer@f103020 {
+			compatible = "apple,s5l8940x-wdt-timer";
+			reg = <0xf103020 0x10>;
+			interrupts = <4>;
+			clock-frequency = <24000000>;
+			status = "okay";
+		};
+
+		pmgr: power-management@f100000 {
+			compatible = "apple,s5l8940x-pmgr", "syscon";
+			reg = <0xf100000 0x7000>;
+			status = "disabled";
+		};
+
+		otgphy: phy@6000000 {
+			compatible = "apple,s5l8940x-otgphy";
+			reg = <0x6000000 0x1000>,	/* otgphyctrl */
+			      <0xf108000 0x1000>;	/* usb-complex */
+			#phy-cells = <1>;
+			status = "okay";
+		};
+
+		dwc2: usb@6100000 {
+			compatible = "apple,s5l8940x-dwc2", "snps,dwc2";
+			reg = <0x6100000 0x10000>;
+			interrupts = <11>;
+			phys = <&otgphy 0>;
+			phy-names = "usb2-phy";
+			dr_mode = "peripheral";
+			g-rx-fifo-size = <512>;
+			g-np-tx-fifo-size = <128>;
+			g-tx-fifo-size = <128 128 128 128 128 128 128 128>;
+			status = "okay";
+		};
+	};
+};

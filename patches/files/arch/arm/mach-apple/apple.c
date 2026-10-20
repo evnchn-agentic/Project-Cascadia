@@ -50,11 +50,11 @@ void __init apple_s5l_wdt_clocksource_init(void);
 void __init apple_s5l_pmu_clkevt_init(unsigned long cpu_hz);
 
 /*
- * P105AP Recovery live scanout (confirmed): phys 0x9F6FC000, portrait
- * 768x1024, stride 3072 (=768*4), BGRA.
+ * J33iAP (AppleTV3,2): HDMI scanout at the live ADT /vram, 0x9F570000;
+ * assumed 1920x1080, stride 7680 -- unconfirmed on hardware.
  */
-#define P105_FB_PHYS	0x9f6fc000
-#define P105_FB_STRIDE	3072
+#define P105_FB_PHYS	0x9f570000
+#define P105_FB_STRIDE	7680
 
 unsigned long p105_fb_phys = P105_FB_PHYS;
 unsigned long p105_fb_stride = P105_FB_STRIDE;
@@ -296,7 +296,7 @@ static void __init apple_s5l_reserve(void)
 {
 	phys_addr_t phys = p105_fb_section();
 
-	memblock_remove(phys, 0x9f6fc000 - phys);
+	memblock_remove(phys, P105_FB_PHYS - phys);
 }
 
 static void __init apple_s5l_map_io(void)
