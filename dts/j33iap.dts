@@ -144,6 +144,20 @@
 			status = "okay";
 		};
 
+		/* The PMU's bus (ADT i2c0, irq 18; Dialog D1815 at 0x74 8-bit = 0x3a).  No child
+		 * node yet: only i2c-dev reads it, so no driver writes PMU registers. */
+		i2c0: i2c@3200000 {
+			compatible = "apple,s5l8940x-i2c";
+			reg = <0x3200000 0x1000>;
+			clock-frequency = <100000>;
+			interrupts = <18>;
+			clocks = <&uart_clk>;
+			clock-names = "i2c";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+		};
+
 		pmgr: power-management@f100000 {
 			compatible = "apple,s5l8940x-pmgr", "syscon";
 			reg = <0xf100000 0x7000>;
