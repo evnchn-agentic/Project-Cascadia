@@ -43,6 +43,9 @@ PKT = 0x8000
 BOARDS = {
     "j33i": dict(HOOK_OFF=0x213A8, TRAMPOLINE_OFF=0x4090E, CACHE_FLUSH=0x9FF1EEAC,
                  DONE_FLAG=0x9FF45A30, USB_CONTINUE=0x9FF1E368),
+    # Full iBoot, sent in iBEC's place: it carries the HDMI driver iBEC lacks.
+    "j33i-iboot": dict(HOOK_OFF=0x24470, TRAMPOLINE_OFF=0x46BDE, CACHE_FLUSH=0x9FF21F74,
+                       DONE_FLAG=0x9FF4E510, USB_CONTINUE=0x9FF21420),
 }
 
 
