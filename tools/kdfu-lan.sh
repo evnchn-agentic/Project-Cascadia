@@ -17,7 +17,7 @@ KLOADER="${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader"
 IBSS="${IBSS:-$ROOT/build/firmware-j33i/iBSS.pwned}"
 
 # iOS 8's dropbear/OpenSSH only speaks the old algorithms.
-OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+OPTS=(-J none -o ConnectTimeout=40 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
       -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
       -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa)
 
