@@ -172,6 +172,30 @@
 			status = "okay";
 		};
 
+		/* EHCI = the host side; the BCM4334 Wi-Fi chip ("monopoly") on HSIC port 2 (ADT
+		 * usb0-ehci/wlan port 2; the iPad's is port 3).  No hsic-supply on purpose: REG_ON
+		 * is PMU GPIO7 on the D1815, not mapped yet, and a warm handoff from iOS may have
+		 * left it high.  PMGR gates match the iPad's offsets (J33i ids 66/67/68 ->
+		 * 0x1084/0x1088/0x1090, decoded from the 44-byte device-clocks table). */
+		ehci: usb@6400000 {
+			compatible = "apple,s5l8940x-ehci", "generic-ehci";
+			reg = <0x6400000 0x10000>;
+			interrupts = <12>;
+			phys = <&otgphy 1>;
+			phy-names = "usb";
+			apple,hsic-ports = <0x2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			wifi@2 {
+				compatible = "usba5c,bd1a";
+				reg = <2>;
+				apple,host-ready-gpios = <&gpio 113 0>;
+				apple,device-ready-gpios = <&gpio 128 0>;
+			};
+		};
+
 		dwc2: usb@6100000 {
 			compatible = "apple,s5l8940x-dwc2", "snps,dwc2";
 			reg = <0x6100000 0x10000>;
