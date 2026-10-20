@@ -5,16 +5,16 @@
 #include "font8x8.h"
 
 #ifndef FB_TEXT_W
-#define FB_TEXT_W 768
+#define FB_TEXT_W 1920
 #endif
 #ifndef FB_TEXT_H
-#define FB_TEXT_H 1024
+#define FB_TEXT_H 1080
 #endif
 #ifndef FB_TEXT_STRIDE
-#define FB_TEXT_STRIDE 3072
+#define FB_TEXT_STRIDE 7680
 #endif
 #ifndef FB_TEXT_SCANOUT
-#define FB_TEXT_SCANOUT 0x9F6FC000u
+#define FB_TEXT_SCANOUT 0x9F570000u
 #endif
 
 typedef unsigned int u32;

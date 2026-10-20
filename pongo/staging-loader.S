@@ -17,9 +17,9 @@
 	.equ	UTRSTAT_TXE,	(1 << 2)
 	.equ	WDT_BASE,	0x0F103020
 	.equ	PL310_BASE,	0x3e000000
-	.equ	CLCD_BASE,	0x3a200000	@ J33i: rgbout, assumed CLCD-compatible registers
+	.equ	CLCD_BASE,	0x3a100000
 	.equ	DTB_GUESS,	0x3e100000
-	.equ	FB_DEFAULT,	0x9f570000
+	.equ	FB_DEFAULT,	0x9f6fc000
 	.equ	ATAGS,		0x80000100
 
 #include "staging-generated.inc"
@@ -258,7 +258,7 @@ patch_dtb_cbar:
 	rev	r4, r6
 	str	r4, [r0]
 	b	3f
-5:	ldr	r4, =7680
+5:	ldr	r4, =4112
 	cmp	r2, r4
 	bne	3f
 	adr	r4, fb_stride
@@ -320,8 +320,8 @@ paint_cbar_bands:
 
 	.align	2
 fb_base:	.word	FB_DEFAULT
-fb_pix:		.word	1920
-fb_stride:	.word	7680
+fb_pix:		.word	1024
+fb_stride:	.word	4112
 
 nybble_color:
 	.word	0xff000000	@ 0 black

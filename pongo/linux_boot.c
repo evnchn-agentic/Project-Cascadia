@@ -32,9 +32,9 @@ u32 main(void)
 
 	fb_text_fill(0, 0, FB_TEXT_W, FB_TEXT_H, BG);
 
-	line(0, "P105 linux-boot", ACC);
+	line(0, "J33i linux-boot", ACC);
 	line(1, "ACE iBEC trampoline", FG);
-	line(2, "FB 0x9F6FC000", FG);
+	line(2, "FB 0x9F570000", FG);
 
 	__asm__ volatile("mrc p15, 4, %0, c15, c0, 0" : "=r"(cbar));
 	cbar &= 0xFFFFE000u;
