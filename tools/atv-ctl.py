@@ -74,8 +74,10 @@ def ios_boot():
     print('power :', power('on'))
     t0 = time.time()
     while not lan_up():
-        if time.time() - t0 > 180:
-            sys.exit('no ssh on the Apple TV after 180 s')
+        if time.time() - t0 > 300:
+            # iOS may be up with the jailbreak not applied (sshd refused); leave USB connected
+            print('vbus  :', vbus('on'))
+            sys.exit('no ssh on the Apple TV after 300 s (untether may not have run: power-cycle again)')
         time.sleep(3)
     print(f'lan   : ssh port up after {time.time() - t0:.0f} s')
     print('vbus  :', vbus('on'))
