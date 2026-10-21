@@ -30,11 +30,17 @@ VMADDR = 0x80001000   # the real j33i kernel's __TEXT
 DEST = 0x80000000     # where linux_boot (bundle offset 0) is linked
 HDR = 0x1000
 
+# TRAMP=reset|copyreset (tests): call iBoot's platform_reset (12H847 0x9FF20440) at entry or after
+# the copy; with VBUS off a reset brings iOS back, which shows the stub was reached.
+TRAMP = __import__("os").environ.get("TRAMP", "")
+RESET = "ldr sp, =0x9F000000\n    mov r0, #0\n    ldr r1, =0x9FF20441\n    blx r1\n"
+
 TRAMP_S = """
     .syntax unified
     .arm
     .global _start
 _start:
+{pre}
     adr   r1, _start
     ldr   r3, size
     sub   r1, r1, r3          @ bundle sits just before the trampoline
@@ -48,7 +54,9 @@ _start:
     mcr   p15, 0, r0, c7, c5, 0   @ invalidate I-cache
     dsb
     isb
+{post}
     bx    r4
+    .ltorg
     .align 2
 dest: .word {dest:#x}
 size: .word {size:#x}
@@ -58,7 +66,8 @@ size: .word {size:#x}
 def tramp(size: int) -> bytes:
     with tempfile.TemporaryDirectory() as d:
         s, o, b = (Path(d) / n for n in ("t.S", "t.o", "t.bin"))
-        s.write_text(TRAMP_S.format(dest=DEST, size=size))
+        s.write_text(TRAMP_S.format(dest=DEST, size=size, pre=RESET if TRAMP == "reset" else "",
+                                     post=RESET if TRAMP == "copyreset" else ""))
         subprocess.run(["clang", "-target", "armv7-none-eabi", "-c", str(s), "-o", str(o)], check=True)
         subprocess.run(["llvm-objcopy" if subprocess.run(["which", "llvm-objcopy"], capture_output=True).returncode == 0
                         else "/opt/homebrew/opt/llvm/bin/llvm-objcopy", "-O", "binary", str(o), str(b)], check=True)
