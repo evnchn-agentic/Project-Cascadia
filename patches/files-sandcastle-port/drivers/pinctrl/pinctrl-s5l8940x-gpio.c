@@ -606,6 +606,20 @@ static int apple_s5l8940x_gpio_pinctrl_probe(struct platform_device *pdev)
         writel(~0u, pctl->base + REG_IRQ_DISABLE(i * 32));
         writel(~0u, pctl->base + REG_IRQ_STATUS(i * 32));
     }
+    /* Disabling and clearing is not enough when iBoot left a pin in a LEVEL trigger mode:
+     * its status re-latches while the level holds, the summary never clears, and AIC 119
+     * livelocks the one CPU in the bounded handler.  Seen on J33i when the kernel is entered
+     * from iBoot's autoboot (fsboot) instead of its USB Recovery.  Drop every pin still in a
+     * trigger mode (HI/LO/UP/DN/ANY) back to plain input; outputs (IRQ_OUT) are left alone.
+     * Linux re-arms whatever it requests. */
+    for(i = 0; i < pctl->npins; i++) {
+        u32 cfg = readl(pctl->base + REG_GPIO(i)), mode = cfg & REG_GPIOx_IRQ_MASK;
+
+        if(mode >= REG_GPIOx_IRQ_HI && mode <= REG_GPIOx_IRQ_ANY)
+            writel(cfg & ~REG_GPIOx_IRQ_MASK, pctl->base + REG_GPIO(i));
+    }
+    for(i = 0; i < IRQ_NWORDS; i++)
+        writel(~0u, pctl->base + REG_IRQ_STATUS(i * 32));
     dev_info(&pdev->dev, "interrupts quiesced as XNU does; NPL mode %#x -> 1\n",
              readl(pctl->base + REG_NPL_MODE));
     writel(1, pctl->base + REG_NPL_MODE);
