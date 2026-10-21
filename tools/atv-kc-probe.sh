@@ -20,7 +20,8 @@ atv() { for _ in 1 2 3 4 5; do sshpass -p alpine ssh "${O[@]}" "$ATV" "$@" && re
 put() { for _ in 1 2 3 4 5; do sshpass -p alpine scp -O "${O[@]}" "$1" "$ATV:$2" 2>/dev/null && return 0; sleep 5; done; return 1; }
 install_kc() { put "$1" /linux.kc.new && atv "mv -f /linux.kc.new /linux.kc && sync"; }
 
-python3 "$ROOT/tools/patch-iboot-fsboot.py" "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
+# PATCH_FLAGS (e.g. "--recovery --direct") picks the iBoot variant under test.
+python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
 python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
 $CTL ios-boot >/dev/null || exit 1
 install_kc "$1" || exit 1

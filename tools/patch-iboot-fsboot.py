@@ -54,6 +54,19 @@ if RECOVERY:
         (0xFE0, bytes.fromhex("0110f09f"), (BASE + CAVE + 1).to_bytes(4, "little")),
     ]
 
+# --direct: enter the kernel like the USB route's autogo does, a plain `blx entry` with MMU, USB
+# and scanout still live, instead of prepare_and_jump (which quiesces them). The stub in
+# mk-fake-kc.py flushes the caches itself before jumping into the loader.
+if "--direct" in sys.argv:
+    sys.argv.remove("--direct")
+    PATCHES.append((0xA16, bytes.fromhex("1ff083fe"), bytes.fromhex("884700bf")))   # blx r1; nop
+
+# --usb-autoboot: let iBoot see USB (it then starts the USB stack, 0xc7e -> 0x25db8) and, after
+# its 5 s wait, fall through to autoboot instead of branching to Recovery (0xe20 `b 0xeb8`).
+if "--usb-autoboot" in sys.argv:
+    sys.argv.remove("--usb-autoboot")
+    PATCHES = [p for p in PATCHES if p[0] != 0x218E0] + [(0xE20, bytes.fromhex("4ae0"), bytes.fromhex("00bf"))]
+
 src, dst = (Path(a) for a in sys.argv[1:3])
 d = bytearray(src.read_bytes())
 for off, old, new in PATCHES:

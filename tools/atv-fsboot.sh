@@ -29,7 +29,7 @@ install)
 remove) atv "rm -f /linux.kc /linux.kc.new && sync"; exit ;;
 esac
 
-python3 "$ROOT/tools/patch-iboot-fsboot.py" "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
+python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
 python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
 for try in $(seq "${1:-6}"); do
     echo "==> try $try"

@@ -50,6 +50,8 @@ _start:
     str   r0, [r2], #4
     subs  r3, r3, #4
     bne   1b
+    ldr   r0, =0x9FF21F75         @ iBoot's cache clean+flush (what autogo calls), for an MMU-on entry
+    blx   r0
     mov   r0, #0
     mcr   p15, 0, r0, c7, c5, 0   @ invalidate I-cache
     dsb
