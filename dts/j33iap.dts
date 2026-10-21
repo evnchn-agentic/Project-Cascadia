@@ -12,7 +12,7 @@
  *   - DRAM is 0x80000000 + 0x1F570000 (hw.memsize), /vram right above it;
  *   - the boot console is uart3 (0x32800000).  uart0 talks to the IR/LED
  *     MCU here, so nothing in this file touches it.
- * Not described yet: Ethernet (0xb000000), Wi-Fi (HSIC port 2), HDMI audio.
+ * Not described yet: HDMI audio.
  */
 
 / {
@@ -222,6 +222,16 @@
 				apple,host-ready-gpios = <&gpio 113 0>;
 				apple,device-ready-gpios = <&gpio 128 0>;
 			};
+		};
+
+		/* Arasan FE 10/100 MAC + SMSC LAN8742 PHY at MDIO 0 (ADT ethernet@b000000, irq 27,
+		 * clock gate 109 = PMGR +0x1144, which the driver turns on).  No MAC address here: the
+		 * real one lives in syscfg; until it is copied in, the driver picks a random one. */
+		ethernet@b000000 {
+			compatible = "apple,s5l8947x-fe";
+			reg = <0xb000000 0x10000>;
+			interrupts = <27>;
+			status = "okay";
 		};
 
 		dwc2: usb@6100000 {
