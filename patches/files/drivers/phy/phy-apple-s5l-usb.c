@@ -219,14 +219,27 @@ static int s5l_usbphy_init(struct phy *phy)
 	 * J33i, read back from a USB-route boot: PWR=0x06 CLK=0x01 U1C=0x06 R40=0x349 U44=0x6ff3
 	 * U60=0x200. */
 	if (readl(p->base + OPHYUNK2) != 0x6ff3 && readl(p->base + OPHYUNK2) != 0x2ff3) {
-		dev_info(p->dev, "PHY not set up by iBoot; writing J33i's USB-route state\n");
-		writel(OPHYCLK_CLKSEL_24MHZ, p->base + OPHYCLK);
+		/* iBoot 12H847's USB PHY bring-up (0x9ff16970), step for step: clock gates 0x1e,
+		 * 0x1f, 0x24 (PMGR +0x1080/+0x1084/+0x1098), dwc2 PCGCCTL StopPclk|GateHclk off,
+		 * then the PHY registers, the clock select and a reset pulse (below). */
+		void __iomem *pcgcctl = ioremap(0x36100e00, 4);
+
+		dev_info(p->dev, "PHY not set up by iBoot; running iBoot's USB PHY bring-up\n");
+		s5l_pmgr_on(p, 0x1080);
+		s5l_pmgr_on(p, 0x1098);
+		if (pcgcctl) {
+			writel(readl(pcgcctl) & ~3, pcgcctl);
+			iounmap(pcgcctl);
+		}
+		udelay(100);
+		writel(OPHYUNK4_START, p->base + OPHYUNK4);
 		writel(0x06, p->base + OPHYPWR);
 		writel(OPHYUNK1_START, p->base + OPHYUNK1);
 		writel(0x349, p->base + 0x40);
 		writel(0x6ff3, p->base + OPHYUNK2);
-		writel(OPHYUNK4_START, p->base + OPHYUNK4);
-		udelay(100);
+		udelay(10);
+		writel((readl(p->base + OPHYCLK) & ~OPHYCLK_CLKSEL_MASK) | OPHYCLK_CLKSEL_24MHZ,
+		       p->base + OPHYCLK);
 	}
 
 	udelay(10);

@@ -31,13 +31,19 @@ esac
 
 python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
 python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
+# PATCH_FLAGS defaults to --direct: iBoot never starts its USB stack (a live one kills Linux
+# within ~2 s); Linux's PHY driver runs iBoot's PHY bring-up itself.
+PATCH_FLAGS="${PATCH_FLAGS:---direct}"
 for try in $(seq "${1:-6}"); do
     echo "==> try $try"
     $CTL ios-boot >/dev/null || continue
     atv "test -s /linux.kc" || { echo "no /linux.kc on the device (run: $0 install)" >&2; exit 2; }
     put "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" /tmp/ && put "$FW/chain.kload" /tmp/ || continue
     timeout 20 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/chain.kload" >/dev/null 2>&1
-    # host-link.sh waits up to 180 s for the gadget; a hung iBoot never brings it up.
+    # The gadget enumerates only after a VBUS edge, as on every other route here: give Linux
+    # ~60 s to boot, replug, then wait for the link.
+    sleep 60
+    $CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
     timeout 200 bash "$ROOT/tools/host-link.sh" && { echo "==> Linux up from /linux.kc (try $try)"; exit 0; }
 done
 echo "no boot after ${1:-6} tries" >&2; exit 1
