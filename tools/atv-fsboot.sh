@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Boot Linux from the Apple TV's own storage: kloader iBoot.fsboot from iOS; it autoboots
-# /linux.kc (tools/mk-fake-kc.py) off the system partition, so nothing is uploaded over USB.
-# Direct kloader of iBoot lands about 1 time in 4, hence the retry loop. VBUS stays on only
-# so the USB link to Linux can confirm the boot.
+# Boot Linux from the Apple TV's own storage: kloader chain.kload from iOS (iBEC does the init,
+# then jumps to iBoot.fsboot stashed in /vram, tools/mk-chain-kloader.py), and iBoot autoboots
+# /linux.kc (tools/mk-fake-kc.py) off the system partition. Nothing is uploaded over USB; VBUS
+# stays on only so the USB link to Linux can confirm the boot.
 #
 #   tools/atv-fsboot.sh install     write /linux.kc to the system partition (needs evnchn's yes)
 #   tools/atv-fsboot.sh remove      rm /linux.kc
@@ -30,12 +30,13 @@ remove) atv "rm -f /linux.kc /linux.kc.new && sync"; exit ;;
 esac
 
 python3 "$ROOT/tools/patch-iboot-fsboot.py" "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
+python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
 for try in $(seq "${1:-6}"); do
     echo "==> try $try"
     $CTL ios-boot >/dev/null || continue
     atv "test -s /linux.kc" || { echo "no /linux.kc on the device (run: $0 install)" >&2; exit 2; }
-    put "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" /tmp/ && put "$FW/iBoot.fsboot" /tmp/ || continue
-    timeout 20 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/iBoot.fsboot" >/dev/null 2>&1
+    put "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" /tmp/ && put "$FW/chain.kload" /tmp/ || continue
+    timeout 20 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/chain.kload" >/dev/null 2>&1
     # host-link.sh waits up to 180 s for the gadget; a hung iBoot never brings it up.
     timeout 200 bash "$ROOT/tools/host-link.sh" && { echo "==> Linux up from /linux.kc (try $try)"; exit 0; }
 done
