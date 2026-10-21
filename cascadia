@@ -312,6 +312,8 @@ cmd_build() {
     # ours, and the cross-compiler is already in the image.
     in_docker "arm-linux-gnueabihf-gcc -static -Os -o build/initramfs-root/bin/peek tools/p105-peek.c"
     [ -s "$ROOT/build/initramfs-root/bin/peek" ] || fail "peek did not build"
+    # /sbin/pmu-gpio: the Apple TV's Wi-Fi REG_ON is D1815 PMU GPIO7 (stage 2 raises it).
+    in_docker "arm-linux-gnueabihf-gcc -static -Os -o build/initramfs-root/sbin/pmu-gpio tools/pmu-gpio.c"
     note "ok: /bin/peek ($(filesize "$ROOT/build/initramfs-root/bin/peek") bytes, static ARM)"
     # /sbin/z2-boot brings the digitizer up the way iOS does -- firmware, the
     # N1 calibration sequence, EXECUTE, operating mode -- where hx-touchd stops
