@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
 # One full Apple TV boot cycle, hands-off:
-#   power-cycle into iOS with VBUS off -> kloader over the LAN -> VBUS replug -> DFU
-#   -> second stage (iBEC, or iBoot repacked as one) -> staging bundle + loader.
+#   power-cycle into iOS with VBUS off -> VBUS on -> kloader -> patched iBoot in Recovery
+#   (it lights HDMI; Recovery because USB is attached) -> staging bundle + loader.
+#   Default PATH_MODE=dfu: kloader iBSS -> VBUS replug -> DFU -> iBoot over USB (proven).
+#   PATH_MODE=direct: kloader iBoot straight from iOS: worked 1 of 2 tries (09:07 yes, 09:12 hung, no HDMI/USB).
 #
-#   tools/atv-cycle.sh [second-stage.dfu]     (default: iBoot repacked, it lights HDMI)
-#   STOP_AT=stage2 tools/atv-cycle.sh ...     stop once the second stage is in Recovery
+#   tools/atv-cycle.sh [second-stage.dfu]     (dfu route only: what to send after iBSS)
+#   STOP_AT=stage2 tools/atv-cycle.sh ...     stop once iBoot is in Recovery
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,22 +28,23 @@ wait_mode() {  # wait_mode <substring> <seconds>
 
 $CTL ios-boot || exit 1
 
-# iOS keeps /tmp across reboots; refresh it anyway, sshd is slow right after boot.
-for _ in 1 2 3 4 5; do
-    sshpass -p alpine scp -O "${O[@]}" "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" \
-        "$ROOT/build/firmware-j33i/iBSS.pwned" "$ATV:/tmp/" 2>/dev/null && break
-    sleep 5
+# /tmp is wiped on reboot, and sshd sometimes rejects the first logins: retry the upload.
+PAYLOAD="$ROOT/build/firmware-j33i/iBoot.autogo"   # direct: the raw patched iBoot
+[ "${PATH_MODE:-dfu}" = dfu ] && PAYLOAD="$ROOT/build/firmware-j33i/iBSS.pwned"
+for f in "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" "$PAYLOAD"; do
+    for _ in 1 2 3 4 5; do sshpass -p alpine scp -O "${O[@]}" "$f" "$ATV:/tmp/" 2>/dev/null && break; sleep 4; done
 done
-timeout 30 sshpass -p alpine ssh "${O[@]}" "$ATV" 'chmod +x /tmp/kloader; /tmp/kloader /tmp/iBSS.pwned' >/dev/null 2>&1
+timeout 30 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/$(basename "$PAYLOAD")" >/dev/null 2>&1
 
-# kloader leaves the USB controller off the bus; a replug brings up the pwned iBSS as DFU.
-$CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
-wait_mode DFU 20 || { echo "no DFU after kloader (mode: $(mode))" >&2; exit 2; }
-echo "==> kDFU"
-
-timeout 60 "$IREC" -f "$STAGE2" >/dev/null 2>&1
-wait_mode Recovery 20 || { echo "second stage did not reach Recovery (mode: $(mode))" >&2; exit 3; }
-echo "==> second stage up: $(basename "$STAGE2")"
+if [ "${PATH_MODE:-dfu}" = dfu ]; then
+    # kloader leaves the USB controller off the bus; a replug brings up the pwned iBSS as DFU.
+    $CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
+    wait_mode DFU 20 || { echo "no DFU after kloader (mode: $(mode))" >&2; exit 2; }
+    echo "==> kDFU"
+    timeout 60 "$IREC" -f "$STAGE2" >/dev/null 2>&1
+fi
+wait_mode Recovery 30 || { echo "iBoot did not reach Recovery (mode: $(mode))" >&2; exit 3; }
+echo "==> iBoot up in Recovery (${PATH_MODE:-dfu} route)"
 [ "${STOP_AT:-}" = stage2 ] && exit 0
 
 timeout 120 "$IREC" -f "$ROOT/output/staging-bundle.bin" >/dev/null 2>&1; sleep 1
