@@ -4,7 +4,8 @@
 #   power-cycle into iOS with VBUS off -> VBUS on -> kloader -> patched iBoot in Recovery
 #   (it lights HDMI; Recovery because USB is attached) -> staging bundle + loader.
 #   Default PATH_MODE=dfu: kloader iBSS -> VBUS replug -> DFU -> iBoot over USB (proven).
-#   PATH_MODE=direct: kloader iBoot straight from iOS: worked 1 of 2 tries (09:07 yes, 09:12 hung, no HDMI/USB).
+#   PATH_MODE=direct: kloader iBoot straight from iOS: 1 of 4 tries (hangs with no HDMI/USB; not load, not idle).
+#   PATH_MODE=ibec: kloader iBEC from iOS -> VBUS replug -> Recovery -> iBoot over USB + go (no DFU step).
 #
 #   tools/atv-cycle.sh [second-stage.dfu]     (dfu route only: what to send after iBSS)
 #   STOP_AT=stage2 tools/atv-cycle.sh ...     stop once iBoot is in Recovery
@@ -31,6 +32,7 @@ $CTL ios-boot || exit 1
 # /tmp is wiped on reboot, and sshd sometimes rejects the first logins: retry the upload.
 PAYLOAD="$ROOT/build/firmware-j33i/iBoot.autogo"   # direct: the raw patched iBoot
 [ "${PATH_MODE:-dfu}" = dfu ] && PAYLOAD="$ROOT/build/firmware-j33i/iBSS.pwned"
+[ "${PATH_MODE:-dfu}" = ibec ] && PAYLOAD="$ROOT/build/firmware-j33i/iBEC.autogo"
 for f in "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" "$PAYLOAD"; do
     for _ in 1 2 3 4 5; do sshpass -p alpine scp -O "${O[@]}" "$f" "$ATV:/tmp/" 2>/dev/null && break; sleep 4; done
 done
@@ -52,6 +54,13 @@ if [ "${PATH_MODE:-dfu}" = dfu ]; then
     wait_mode DFU 20 || { echo "no DFU after kloader (mode: $(mode))" >&2; exit 2; }
     echo "==> kDFU"
     timeout 60 "$IREC" -f "$STAGE2" >/dev/null 2>&1
+elif [ "${PATH_MODE:-dfu}" = ibec ]; then
+    # iBEC also comes up off the bus; after the replug it sits in Recovery and takes iBoot.
+    $CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
+    wait_mode Recovery 20 || { echo "no iBEC Recovery after kloader (mode: $(mode))" >&2; exit 2; }
+    echo "==> iBEC"
+    timeout 60 "$IREC" -f "$ROOT/build/firmware-j33i/iBoot.as-ibec.plain.dfu" >/dev/null 2>&1
+    timeout 8 "$IREC" -c go >/dev/null 2>&1; sleep 5
 fi
 wait_mode Recovery 30 || { echo "iBoot did not reach Recovery (mode: $(mode))" >&2; exit 3; }
 echo "==> iBoot up in Recovery (${PATH_MODE:-dfu} route)"
