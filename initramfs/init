@@ -32,6 +32,11 @@ mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 
 msg() { echo "$*" > /dev/kmsg; }
 
+# Boot probe (J33i): "atvprobe" on the command line resets the box as soon as userspace runs,
+# through iBoot's own reset line (SoC GPIO 28 <- 0x213, what platform_reset does). With USB
+# attached the box then shows up as stock iBoot in Recovery: proof that the kernel got here.
+grep -q atvprobe /proc/cmdline && /bin/peek w 3fa00070 213
+
 # READ THIS BEFORE ADDING A sleep ABOVE THE USB DANCE.
 #
 # The system tick IS the dwc2 Start-of-Frame interrupt.  SOFs only arrive while

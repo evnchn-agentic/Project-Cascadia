@@ -21,7 +21,7 @@ _start:
 	str	r1, [r0, #0x08]
 	str	r1, [r0, #0x0C]
 
-	ldr	sp, =0x8000F000
+	ldr	sp, =0x80008000		/* top of the loader's free padding; 0x8000F000 was inside zImage */
 	bl	main
 	/* main returns DTB phys in r0 */
 	b	linux_boot_jump
@@ -122,8 +122,16 @@ l2x0_flush_all:
 	mov	r1, #0xff00
 	orr	r1, r1, #0xff
 	str	r1, [r0, #0x7fc]
-1:	ldr	r1, [r0, #0x7fc]
-	tst	r1, #1
+	/* Wait for EVERY way, not just way 0, then drain with a cache sync.  On the USB route the
+	 * bundle arrives by DMA and L2 holds nothing dirty; on fsboot the stub copies 28 MB through
+	 * the caches, so the last ~1 MB (zImage tail + DTB) is still in L2 when the MMU goes off. */
+1:	ldr	r2, [r0, #0x7fc]
+	tst	r2, r1
 	bne	1b
+	mov	r1, #0
+	str	r1, [r0, #0x730]
+3:	ldr	r1, [r0, #0x730]
+	tst	r1, #1
+	bne	3b
 2:	dsb
 	pop	{r0, r1, r2, pc}
