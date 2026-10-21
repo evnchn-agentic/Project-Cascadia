@@ -29,11 +29,11 @@ install)
 remove) atv "rm -f /linux.kc /linux.kc.new && sync"; exit ;;
 esac
 
-python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
-python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
 # PATCH_FLAGS defaults to --direct: iBoot never starts its USB stack (a live one kills Linux
 # within ~2 s); Linux's PHY driver runs iBoot's PHY bring-up itself.
 PATCH_FLAGS="${PATCH_FLAGS:---direct}"
+python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
+python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
 for try in $(seq "${1:-6}"); do
     echo "==> try $try"
     $CTL ios-boot >/dev/null || continue
