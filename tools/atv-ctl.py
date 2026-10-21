@@ -67,20 +67,24 @@ def lan_up(timeout=1.5):
         return False
 
 
-def ios_boot():
-    print('vbus  :', vbus('off'))
-    print('power :', power('off'))
-    time.sleep(5)
-    print('power :', power('on'))
-    t0 = time.time()
-    while not lan_up():
-        if time.time() - t0 > 300:
-            # iOS may be up with the jailbreak not applied (sshd refused); leave USB connected
+def ios_boot(tries=2):
+    # The first iOS boot after a Linux session has twice come up without the jailbreak
+    # (home screen and AirPlay fine, sshd refusing); a second power cycle fixed it both times.
+    for attempt in range(1, tries + 1):
+        print('vbus  :', vbus('off'))
+        print('power :', power('off'))
+        time.sleep(5)
+        print('power :', power('on'))
+        t0 = time.time()
+        while not lan_up() and time.time() - t0 < 300:
+            time.sleep(3)
+        if lan_up():
+            print(f'lan   : ssh port up after {time.time() - t0:.0f} s (attempt {attempt})')
             print('vbus  :', vbus('on'))
-            sys.exit('no ssh on the Apple TV after 300 s (untether may not have run: power-cycle again)')
-        time.sleep(3)
-    print(f'lan   : ssh port up after {time.time() - t0:.0f} s')
+            return
+        print(f'lan   : no ssh after 300 s (attempt {attempt}): jailbreak not applied?')
     print('vbus  :', vbus('on'))
+    sys.exit(f'no ssh on the Apple TV after {tries} power cycles')
 
 
 if __name__ == '__main__':
