@@ -213,6 +213,22 @@ static int s5l_usbphy_init(struct phy *phy)
 	 * Old comment claimed "OPHYUNK2=0xF8 is what iBoot's DFU state
 	 * leaves set". That was wrong; the correct DFU state is 0x2ff3. */
 
+	/* Unless iBoot never ran its USB stack: on the fsboot route (J33i, iBoot autoboots /linux.kc
+	 * without starting USB) the PHY is at reset defaults and nothing enumerates.  UNK2 not holding
+	 * uotgtune2 (iPad 0x2ff3, J33i 0x6ff3) is the tell.  Then write the state iBoot's USB leaves on
+	 * J33i, read back from a USB-route boot: PWR=0x06 CLK=0x01 U1C=0x06 R40=0x349 U44=0x6ff3
+	 * U60=0x200. */
+	if (readl(p->base + OPHYUNK2) != 0x6ff3 && readl(p->base + OPHYUNK2) != 0x2ff3) {
+		dev_info(p->dev, "PHY not set up by iBoot; writing J33i's USB-route state\n");
+		writel(OPHYCLK_CLKSEL_24MHZ, p->base + OPHYCLK);
+		writel(0x06, p->base + OPHYPWR);
+		writel(OPHYUNK1_START, p->base + OPHYUNK1);
+		writel(0x349, p->base + 0x40);
+		writel(0x6ff3, p->base + OPHYUNK2);
+		writel(OPHYUNK4_START, p->base + OPHYUNK4);
+		udelay(100);
+	}
+
 	udelay(10);
 
 	/* Toggle PHY soft reset — clears any pending state without touching
