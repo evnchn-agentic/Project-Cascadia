@@ -125,6 +125,34 @@
 			pin-count = <224>;
 			interrupt-groups = <1>;
 			status = "okay";
+
+			/* UART2, the Bluetooth chip's: TX 18, RX 19, RTS 20, CTS 21 (ADT uart2
+			 * function-tx 0x0202, function-rts 0x0204: port 2, pins 2 and 4). */
+			uart2_pins: uart2-pins {
+				pins = "gpio18", "gpio19", "gpio20", "gpio21";
+				function = "periph";
+			};
+		};
+
+		/* UART2: the BCM4334's Bluetooth half (ADT uart2/bluetooth "n88", module Monopoly OS,
+		 * patchram cut from BlueTool). iOS runs it at 3 Mbaud; 24 MHz / 16 caps us at 1.5. */
+		uart2: serial@2700000 {
+			compatible = "apple,s5l8940x-uart", "apple,s5l-uart", "samsung,s3c6400-uart";
+			reg = <0x2700000 0x1000>;
+			interrupts = <23>;
+			clocks = <&uart_clk>, <&uart_clk>;
+			clock-names = "uart", "clk_uart_baud0";
+			pinctrl-names = "default";
+			pinctrl-0 = <&uart2_pins>;
+			status = "okay";
+
+			bluetooth {
+				compatible = "brcm,bcm4334-bt";
+				shutdown-gpios = <&gpio 104 0>;		/* function-power_enable 0x0d00 */
+				device-wakeup-gpios = <&gpio 105 0>;	/* function-bt_wake 0x0d01 */
+				max-speed = <1500000>;
+				local-bd-address = [00 00 00 00 00 00];	/* your board's own address */
+			};
 		};
 
 		uart3: serial@2800000 {
