@@ -213,6 +213,20 @@ static int s5l_usbphy_init(struct phy *phy)
 	 * Old comment claimed "OPHYUNK2=0xF8 is what iBoot's DFU state
 	 * leaves set". That was wrong; the correct DFU state is 0x2ff3. */
 
+	/* Unless iBoot never ran its USB stack: on the fsboot route (J33i, iBoot autoboots /linux.kc
+	 * without starting USB) the PHY is at reset defaults and nothing enumerates.  UNK2 still not
+	 * holding uotgtune2-device is the tell.  Then do the bring-up iBoot would have done, with
+	 * the values it leaves (see above): 24 MHz clock, PLL and XO powered, tuning. */
+	if (readl(p->base + OPHYUNK2) != 0x2ff3) {
+		dev_info(p->dev, "PHY not set up by iBoot; programming it\n");
+		writel(OPHYCLK_CLKSEL_24MHZ, p->base + OPHYCLK);
+		writel(0, p->base + OPHYPWR);
+		udelay(100);
+		writel(OPHYUNK1_START, p->base + OPHYUNK1);
+		writel(0x2ff3, p->base + OPHYUNK2);
+		writel(OPHYUNK4_START, p->base + OPHYUNK4);
+	}
+
 	udelay(10);
 
 	/* Toggle PHY soft reset — clears any pending state without touching
