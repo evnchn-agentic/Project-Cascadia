@@ -34,6 +34,16 @@ PAYLOAD="$ROOT/build/firmware-j33i/iBoot.autogo"   # direct: the raw patched iBo
 for f in "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" "$PAYLOAD"; do
     for _ in 1 2 3 4 5; do sshpass -p alpine scp -O "${O[@]}" "$f" "$ATV:/tmp/" 2>/dev/null && break; sleep 4; done
 done
+# Direct route: let iOS finish booting before kloader tears it down (hypothesis under test:
+# the one hang came seconds after boot, load ~60-80; the success was into a long-idle iOS).
+if [ "${PATH_MODE:-dfu}" = direct ]; then
+    for _ in $(seq 40); do
+        la=$(sshpass -p alpine ssh "${O[@]}" "$ATV" "sysctl -n vm.loadavg" 2>/dev/null | awk '{print int($2)}')
+        [ -n "$la" ] && [ "$la" -lt "${SETTLE_LOAD:-8}" ] && break
+        sleep 5
+    done
+    echo "==> iOS load settled ($la) before kloader"
+fi
 timeout 30 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/$(basename "$PAYLOAD")" >/dev/null 2>&1
 
 if [ "${PATH_MODE:-dfu}" = dfu ]; then
