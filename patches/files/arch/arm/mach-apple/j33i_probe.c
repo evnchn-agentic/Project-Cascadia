@@ -71,6 +71,10 @@ static int __init atvprobe_core(void)
 core_initcall(atvprobe_core);
 static int __init atvprobe_arch(void) { atvprobe_fire("arch"); return 0; }
 arch_initcall(atvprobe_arch);
+/* arch_initcall_sync: after every level-3 initcall; linked from arch/, so before drivers/of's
+ * of_platform_default_populate_init in the same 3s level. */
+static int __init atvprobe_archsync(void) { atvprobe_fire("archsy"); return 0; }
+arch_initcall_sync(atvprobe_archsync);
 static int __init atvprobe_subsys(void) { atvprobe_fire("subsys"); return 0; }
 subsys_initcall(atvprobe_subsys);
 static int __init atvprobe_fs(void) { atvprobe_fire("fs"); return 0; }
