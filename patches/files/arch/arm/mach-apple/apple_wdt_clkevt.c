@@ -50,6 +50,7 @@
 #include <linux/processor.h>
 
 #define WDT_CUR_TIME		0x00
+#define AIC_TIME_LO		0x20	/* AIC1 timebase, 24 MHz (irq-apple-aic1.c AIC1_TIME_LO) */
 #define APPLE_WDT_REF_HZ	24000000UL
 
 static inline u32 apple_pmccntr(void)
@@ -68,14 +69,23 @@ static inline u32 apple_pmccntr(void)
  */
 static void __iomem *wdt_base;
 
+/*
+ * What the three readers below actually read: the AIC's own 24 MHz timebase (TIME_LO) when it
+ * is there, else the watchdog counter.  On J33i entered from iBoot's autoboot (fsboot, no USB
+ * Recovery) the watchdog counter stops within ~2 s of kernel entry while the AIC timebase keeps
+ * running -- and with the delay timer, sched_clock and clocksource on it, every mdelay, sleep
+ * and timer in the boot froze for good.
+ */
+static void __iomem *cs_reg;
+
 static u64 notrace apple_wdt_sched_read(void)
 {
-	return readl_relaxed(wdt_base + WDT_CUR_TIME);
+	return readl_relaxed(cs_reg);
 }
 
 static u64 apple_wdt_cs_read(struct clocksource *cs)
 {
-	return readl_relaxed(wdt_base + WDT_CUR_TIME);
+	return readl_relaxed(cs_reg);
 }
 
 static struct clocksource apple_wdt_cs = {
@@ -93,7 +103,7 @@ static struct clocksource apple_wdt_cs = {
 
 static unsigned long apple_wdt_delay_read(void)
 {
-	return readl_relaxed(wdt_base + WDT_CUR_TIME);
+	return readl_relaxed(cs_reg);
 }
 
 /* udelay's timer too: one counter for every CPU.  PMCCNTR, which had this job,
@@ -113,15 +123,35 @@ static struct delay_timer apple_wdt_delay = {
  */
 void __init apple_s5l_wdt_clocksource_init(void)
 {
+	struct device_node *np;
+	void __iomem *aic;
+
 	if (!wdt_base) {
 		pr_err("CS: counter not mapped, wall time stays on PMCCNTR (wrong in idle)\n");
 		return;
 	}
 
+	cs_reg = wdt_base + WDT_CUR_TIME;
+	np = of_find_compatible_node(NULL, NULL, "aic,1");
+	aic = np ? of_iomap(np, 0) : NULL;
+	of_node_put(np);
+	if (aic) {
+		u32 t0 = readl_relaxed(aic + AIC_TIME_LO), w0 = readl_relaxed(wdt_base + WDT_CUR_TIME);
+
+		/* ~1 ms of watchdog ticks: does the AIC timebase move as well? */
+		while ((u32)(readl_relaxed(wdt_base + WDT_CUR_TIME) - w0) < APPLE_WDT_REF_HZ / 1000)
+			cpu_relax();
+		if (readl_relaxed(aic + AIC_TIME_LO) != t0) {
+			cs_reg = aic + AIC_TIME_LO;
+			apple_wdt_cs.name = "apple-aic-24m";
+		}
+	}
+
 	clocksource_register_hz(&apple_wdt_cs, APPLE_WDT_REF_HZ);
 	sched_clock_register(apple_wdt_sched_read, 32, APPLE_WDT_REF_HZ);
 	register_current_timer_delay(&apple_wdt_delay);
-	pr_err("CS: 24 MHz watchdog counter is now the clocksource, sched_clock and delay timer\n");
+	pr_err("CS: 24 MHz %s is now the clocksource, sched_clock and delay timer\n",
+	       cs_reg == wdt_base + WDT_CUR_TIME ? "watchdog counter" : "AIC timebase");
 }
 
 /**

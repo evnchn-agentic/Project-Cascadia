@@ -39,7 +39,7 @@ static void j33i_reset(void)
 /* "atvprobe=ctrc|ctrs": does the 24 MHz watchdog counter (the clocksource and delay timer) still
  * run at core / subsys level?  Two reads around a pure CPU loop (no delay-timer use); reset only
  * if it advanced, so a hang means the counter is frozen. */
-static void __init atvprobe_ctr(const char *level)
+static void __init atvprobe_ctr_at(const char *level, phys_addr_t pa)
 {
 	void __iomem *w;
 	u32 a, b;
@@ -47,7 +47,7 @@ static void __init atvprobe_ctr(const char *level)
 
 	if (strcmp(probe_at, level))
 		return;
-	w = ioremap(0x3f103020, 4);
+	w = ioremap(pa, 4);
 	a = readl(w);
 	for (i = 0; i < 20000000; i++)
 		;
@@ -83,6 +83,26 @@ static void __init atvprobe_ctrw(void)
 		}
 	}
 	strscpy(probe_at, "ctrc", sizeof(probe_at));
+}
+
+#define atvprobe_ctr(level)	atvprobe_ctr_at(level, 0x3f103020)
+
+/* "atvprobe=pmcs": is PMCCNTR (the CPU cycle counter) still counting at subsys? */
+static inline u32 j33i_pmccntr(void);
+static void __init atvprobe_pmc(const char *level)
+{
+	u32 a;
+	volatile unsigned long i;
+
+	if (strcmp(probe_at, level))
+		return;
+	a = j33i_pmccntr();
+	for (i = 0; i < 1000000; i++)
+		;
+	if (j33i_pmccntr() != a)
+		j33i_reset();
+	for (;;)
+		cpu_relax();
 }
 
 static void __init atvprobe_fire(const char *level)
@@ -175,6 +195,8 @@ static int __init atvprobe_subsys(void)
 		j33i_reset();
 	}
 	atvprobe_ctr("ctrs");
+	atvprobe_ctr_at("aict", 0x3f200020);	/* AIC1 timebase TIME_LO */
+	atvprobe_pmc("pmcs");
 	atvprobe_fire("subsys");
 	return 0;
 }
