@@ -36,12 +36,14 @@ esac
 PATCH_FLAGS="${PATCH_FLAGS:---direct}"
 python3 "$ROOT/tools/patch-iboot-fsboot.py" ${PATCH_FLAGS:-} "$FW/iBoot.autogo" "$FW/iBoot.fsboot" >/dev/null || exit 1
 python3 "$ROOT/tools/mk-chain-kloader.py" "$FW/iBEC.patched" "$FW/iBoot.fsboot" "$FW/chain.kload" >/dev/null || exit 1
+rm -f "$FW/.linux-ip"
 for try in $(seq "${1:-6}"); do
     echo "==> try $try"
     $CTL ios-boot >/dev/null || continue
     atv "test -s /linux.kc" || { echo "no /linux.kc on the device (run: $0 install)" >&2; exit 2; }
     put "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" /tmp/ && put "$FW/chain.kload" /tmp/ || continue
     mac=$(atv "ifconfig en0" | awk '/ether/{print $2}')
+    [ "${WAKE:-lan}" = lan ] && [ -z "$mac" ] && { echo "no en0 MAC from iOS" >&2; continue; }
     [ "${WAKE:-lan}" = lan ] && $CTL vbus off >/dev/null
     timeout 20 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/chain.kload" >/dev/null 2>&1
     if [ "${WAKE:-lan}" = lan ]; then
