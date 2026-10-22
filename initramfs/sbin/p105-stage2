@@ -262,7 +262,12 @@ fi
 # Apple TV 3 Ethernet (s5l_fe): up and on DHCP, so the box is reachable over the LAN with no
 # USB cable at all (the cable-free fsboot route).  udhcpc keeps retrying in the background.
 if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -e /sys/class/net/eth0 ]; then
-    ip link set eth0 up && udhcpc -i eth0 -b -q -t 10 >/tmp/udhcpc.log 2>&1 &
+    # The real MAC sits in syscfg; Apple numbers en0 as the Wi-Fi chip's OTP address + 1, so take
+    # it from wlan0 once brcmfmac has made it (~8 s in), else keep the driver's random one.
+    ( for _ in $(seq 20); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
+      w=$(cat /sys/class/net/wlan0/address 2>/dev/null)
+      [ -n "$w" ] && ip link set eth0 address "${w%:*}:$(printf %02x $(( (0x${w##*:} + 1) & 0xff )))"
+      ip link set eth0 up && udhcpc -i eth0 -b -q -t 10 >/tmp/udhcpc.log 2>&1 ) &
     msg "J33i: eth0 up, DHCP in the background (/tmp/udhcpc.log)"
 fi
 # `wifi auto on` leaves /etc/wifi/auto: join the remembered networks.  In the
