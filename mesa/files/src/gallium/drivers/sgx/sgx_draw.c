@@ -317,7 +317,7 @@ emit_vertex(struct sgx_render *sr, const float *in, float *out)
 }
 
 static void
-render_index(struct sgx_render *sr, unsigned index)
+render_vertex(struct sgx_render *sr, const float *in)
 {
    struct sgx_context *ctx = sr->ctx;
    unsigned vf = sgx_frame_vertex_floats(&ctx->layout);
@@ -333,8 +333,109 @@ render_index(struct sgx_render *sr, unsigned index)
    }
    /* the triangles as the draw module wound them: the TA culls nothing
     * (state word 18, M18), and gl_FrontFacing reads the winding */
-   emit_vertex(sr, (const float *)(sr->vertices + index * sr->vertex_size),
-               ctx->verts + ctx->nverts++ * vf);
+   emit_vertex(sr, in, ctx->verts + ctx->nverts++ * vf);
+}
+
+/* (M43) ARB_depth_clamp: a triangle's depth clamped to the depth range,
+ * the near and far planes clipping nothing (the draw module's z clipping
+ * is off with them).  The ISP clamps no depth (gloffset --clamp, M38), so
+ * the triangle is cut where its depth crosses an end of the range -- a
+ * line across it on the screen, window z being linear there -- and the
+ * parts past the ends drawn at the end's depth, a fan each: exactly the
+ * clamped depths.  A new vertex's varyings are perspective-correct (1 / w
+ * and v / w linear on the screen); with flat shading every vertex has the
+ * provoking one's colours.  Without depth clamping the same keeps depth in
+ * 0..1 (the draw module's polygon offset may take it past). */
+#define CLAMP_FLOATS (4 + 4 * 16)
+#define CLAMP_MAX_VERTS 6
+
+struct clamp_poly {
+   float v[CLAMP_MAX_VERTS][CLAMP_FLOATS];
+   unsigned n;
+};
+
+/* the part of in on one side of window z = zc: below (z <= zc) or not */
+static void
+clamp_cut(const struct clamp_poly *in, unsigned nf, float zc, bool below, struct clamp_poly *out)
+{
+   out->n = 0;
+   for (unsigned i = 0; i < in->n; i++) {
+      const float *a = in->v[i], *b = in->v[(i + 1) % in->n];
+      bool ain = below ? a[2] <= zc : a[2] >= zc, bin = below ? b[2] <= zc : b[2] >= zc;
+
+      if (ain && out->n < CLAMP_MAX_VERTS)
+         memcpy(out->v[out->n++], a, nf * sizeof(float));
+      if (ain != bin && out->n < CLAMP_MAX_VERTS) {
+         float t = (zc - a[2]) / (b[2] - a[2]), *o = out->v[out->n++];
+         float q = a[3] + t * (b[3] - a[3]);
+
+         o[0] = a[0] + t * (b[0] - a[0]);
+         o[1] = a[1] + t * (b[1] - a[1]);
+         o[2] = zc;
+         o[3] = q;
+         for (unsigned k = 4; k < nf; k++)
+            o[k] = q != 0 ? (a[k] * a[3] + t * (b[k] * b[3] - a[k] * a[3])) / q : a[k];
+      }
+   }
+}
+
+static void
+clamp_emit(struct sgx_render *sr, struct clamp_poly *p, unsigned nf, const float *flat,
+           unsigned nflat, bool at, float z)
+{
+   for (unsigned i = 0; i < p->n; i++) {
+      if (at)
+         p->v[i][2] = z;
+      if (flat)
+         memcpy(p->v[i] + 4, flat + 4, nflat * sizeof(float));
+   }
+   for (unsigned i = 1; i + 1 < p->n; i++) {
+      render_vertex(sr, p->v[0]);
+      render_vertex(sr, p->v[i]);
+      render_vertex(sr, p->v[i + 1]);
+   }
+}
+
+static void
+render_triangle(struct sgx_render *sr, unsigned i0, unsigned i1, unsigned i2)
+{
+   struct sgx_context *ctx = sr->ctx;
+   const struct pipe_rasterizer_state *r = ctx->rast;
+   const float *v[3] = {
+      (const float *)(sr->vertices + i0 * sr->vertex_size),
+      (const float *)(sr->vertices + i1 * sr->vertex_size),
+      (const float *)(sr->vertices + i2 * sr->vertex_size),
+   };
+   unsigned nf = sr->vertex_size / sizeof(float);
+
+   if (r && nf <= CLAMP_FLOATS) {
+      float n = ctx->viewport.translate[2] - (r->clip_halfz ? 0 : ctx->viewport.scale[2]);
+      float f = ctx->viewport.translate[2] + ctx->viewport.scale[2];
+      float lo = ctx->depth_clamp ? CLAMP(MIN2(n, f), 0.0f, 1.0f) : 0;
+      float hi = ctx->depth_clamp ? CLAMP(MAX2(n, f), 0.0f, 1.0f) : 1;
+
+      if (v[0][2] < lo || v[1][2] < lo || v[2][2] < lo ||
+          v[0][2] > hi || v[1][2] > hi || v[2][2] > hi) {
+         struct clamp_poly t = { .n = 3 }, part, rest;
+         /* (the TA's flat colours: the layout's first ncolours varyings,
+          * from the triangle's last vertex) */
+         const float *flat = r->flatshade && ctx->layout.ncolours ? v[2] : NULL;
+         unsigned nflat = MIN2(4 * ctx->layout.ncolours, nf - 4);
+
+         for (unsigned i = 0; i < 3; i++)
+            memcpy(t.v[i], v[i], nf * sizeof(float));
+         clamp_cut(&t, nf, lo, true, &part);
+         clamp_emit(sr, &part, nf, flat, nflat, true, lo);
+         clamp_cut(&t, nf, lo, false, &rest);
+         clamp_cut(&rest, nf, hi, false, &part);
+         clamp_emit(sr, &part, nf, flat, nflat, true, hi);
+         clamp_cut(&rest, nf, hi, true, &part);
+         clamp_emit(sr, &part, nf, flat, nflat, false, 0);
+         return;
+      }
+   }
+   for (unsigned i = 0; i < 3; i++)
+      render_vertex(sr, v[i]);
 }
 
 static uint32_t isp_offset(const struct pipe_rasterizer_state *r);
@@ -367,22 +468,25 @@ render_draw_elements(struct vbuf_render *r, const uint16_t *indices, unsigned n)
                      u_prim_name(sr->prim));
       return;
    }
-   for (unsigned i = 0; i < n - n % 3; i++)
-      render_index(sr, indices[turned(i, turn)]);
+   for (unsigned i = 0; i + 2 < n; i += 3)
+      render_triangle(sr, indices[turned(i, turn)], indices[turned(i + 1, turn)],
+                      indices[turned(i + 2, turn)]);
 }
 
 static void
 render_draw_arrays(struct vbuf_render *r, unsigned start, unsigned n)
 {
    struct sgx_render *sr = sgx_render(r);
+   bool turn = flat_first(sr->ctx);
 
    if (sr->prim != MESA_PRIM_TRIANGLES) {
       mesa_logw_once("sgx: %s left over by the draw module: dropped",
                      u_prim_name(sr->prim));
       return;
    }
-   for (unsigned i = 0; i < n - n % 3; i++)
-      render_index(sr, start + turned(i, flat_first(sr->ctx)));
+   for (unsigned i = 0; i + 2 < n; i += 3)
+      render_triangle(sr, start + turned(i, turn), start + turned(i + 1, turn),
+                      start + turned(i + 2, turn));
 }
 
 static void
@@ -2204,8 +2308,9 @@ gpu_vs_can_draw(struct sgx_context *ctx, const struct pipe_draw_info *info)
    if (info->mode != MESA_PRIM_TRIANGLES && info->mode != MESA_PRIM_TRIANGLE_STRIP &&
        info->mode != MESA_PRIM_TRIANGLE_FAN)
       return false;
-   /* (instances and restarts: the draw module's, M43) */
+   /* (instances, restarts and depth clamping: the draw module's, M43) */
    if (info->primitive_restart || info->instance_count != 1 || info->start_instance ||
+       r->depth_clamp || !r->depth_clip_near || !r->depth_clip_far ||
        r->cull_face == PIPE_FACE_FRONT_AND_BACK ||
        r->fill_front != PIPE_POLYGON_MODE_FILL || r->fill_back != PIPE_POLYGON_MODE_FILL ||
        r->clip_plane_enable ||

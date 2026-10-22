@@ -316,6 +316,9 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    caps->primitive_restart = true;
    caps->primitive_restart_fixed_index = true;
    caps->conditional_render = true;
+   /* (M43) ARB_depth_clamp: the draw module's, near and far clipping off
+    * and the triangles cut at the depth range's ends (render_triangle) */
+   caps->depth_clip_disable = true;
    /* (M43) EXT_framebuffer_sRGB: a surface's format says whether the
     * program encodes (sgx_blend_key's rt_srgb) */
    caps->dest_surface_srgb_control = true;

@@ -850,6 +850,15 @@ sgx_bind_rs_state(struct pipe_context *pctx, void *state)
    if (ctx->draw && state)
       draw_set_rasterizer_state(ctx->draw, state, state);
    ctx->rast = state;
+   /* (M43) depth clamping as the program's state has it: the draw
+    * module's wide line and point stages bind one of their own for their
+    * triangles, with depth clipping and clamping both off */
+   if (state) {
+      const struct pipe_rasterizer_state *r = state;
+
+      if (r->depth_clip_near || r->depth_clip_far || r->depth_clamp)
+         ctx->depth_clamp = r->depth_clamp;
+   }
 }
 
 static void

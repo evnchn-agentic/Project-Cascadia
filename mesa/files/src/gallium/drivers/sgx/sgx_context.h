@@ -216,6 +216,7 @@ struct sgx_context {
    const struct pipe_rasterizer_state *rast;
    const struct sgx_vertex_elements *velems;
    struct pipe_viewport_state viewport;
+   bool depth_clamp;            /* the program's rasterizer state's (M43) */
    struct pipe_scissor_state scissor;
    struct pipe_stencil_ref stencil_ref;
    struct sgx_pixel_program clear_prog;  /* writes nothing: sgx_zs_clear() */
