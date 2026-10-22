@@ -148,7 +148,7 @@
 			status = "okay";
 
 			mcu {
-				compatible = "apple,j33i-mcu";	/* arch/arm/mach-apple/atv_mcu.c */
+				compatible = "apple,j33i-mcu";	/* drivers/input/misc/apple-tv-mcu.c */
 			};
 		};
 

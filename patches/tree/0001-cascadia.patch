@@ -256,6 +256,41 @@ index 7698d9d59..dc856943c 100644
  	}
  
  	ret = i2c->msg_idx;
+diff --git a/drivers/input/misc/Kconfig b/drivers/input/misc/Kconfig
+index 6a852c763..149f19a00 100644
+--- a/drivers/input/misc/Kconfig
++++ b/drivers/input/misc/Kconfig
+@@ -80,6 +80,18 @@ config INPUT_AD714X_SPI
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called ad714x-spi.
+ 
++config INPUT_APPLE_TV_MCU
++	tristate "Apple TV 3 MCU: IR remote and front LED"
++	depends on SERIAL_DEV_BUS && (ARCH_APPLE_S5L || COMPILE_TEST)
++	depends on LEDS_CLASS
++	default ARCH_APPLE_S5L
++	help
++	  Say Y here to support the TI MSP430 microcontroller of the Apple
++	  TV 3, which receives the IR remote and drives the front LED.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called apple-tv-mcu.
++
+ config INPUT_ARIEL_PWRBUTTON
+ 	tristate "Dell Wyse 3020 Power Button Driver"
+ 	depends on SPI
+diff --git a/drivers/input/misc/Makefile b/drivers/input/misc/Makefile
+index 4f7f73683..e48e1dfc8 100644
+--- a/drivers/input/misc/Makefile
++++ b/drivers/input/misc/Makefile
+@@ -16,6 +16,7 @@ obj-$(CONFIG_INPUT_ADXL34X)		+= adxl34x.o
+ obj-$(CONFIG_INPUT_ADXL34X_I2C)		+= adxl34x-i2c.o
+ obj-$(CONFIG_INPUT_ADXL34X_SPI)		+= adxl34x-spi.o
+ obj-$(CONFIG_INPUT_APANEL)		+= apanel.o
++obj-$(CONFIG_INPUT_APPLE_TV_MCU)	+= apple-tv-mcu.o
+ obj-$(CONFIG_INPUT_ARIEL_PWRBUTTON)	+= ariel-pwrbutton.o
+ obj-$(CONFIG_INPUT_ARIZONA_HAPTICS)	+= arizona-haptics.o
+ obj-$(CONFIG_INPUT_ATC260X_ONKEY)	+= atc260x-onkey.o
 diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
 index 1ac26fc2e..9bde1a9fc 100644
 --- a/drivers/input/touchscreen/Kconfig
@@ -360,6 +395,45 @@ index 2a9f91e81..ca986f254 100644
  obj-$(CONFIG_MFD_RSMU_I2C)	+= rsmu_i2c.o rsmu_core.o
  obj-$(CONFIG_MFD_RSMU_SPI)	+= rsmu_spi.o rsmu_core.o
 +obj-$(CONFIG_MFD_APPLE_PMU_I2C)    += apple-pmu-i2c.o
+diff --git a/drivers/net/ethernet/apple/Kconfig b/drivers/net/ethernet/apple/Kconfig
+index a4176d2ec..47cd1888f 100644
+--- a/drivers/net/ethernet/apple/Kconfig
++++ b/drivers/net/ethernet/apple/Kconfig
+@@ -6,7 +6,7 @@
+ config NET_VENDOR_APPLE
+ 	bool "Apple devices"
+ 	default y
+-	depends on (PPC_PMAC && PPC32) || MAC
++	depends on (PPC_PMAC && PPC32) || MAC || ARCH_APPLE_S5L
+ 	help
+ 	  If you have a network (Ethernet) card belonging to this class, say Y.
+ 
+@@ -60,4 +60,16 @@ config MACMACE
+ 	  the 660AV and 840AV Macintosh.  If you have one of these Macintoshes
+ 	  say Y here.
+ 
++config S5L_FE
++	tristate "Apple S5L8947X (Apple TV 3) Fast Ethernet"
++	depends on ARCH_APPLE_S5L || COMPILE_TEST
++	select PHYLIB
++	default ARCH_APPLE_S5L
++	help
++	  The Arasan 10/100 Ethernet MAC of the Apple TV 3 (S5L8947X), with
++	  its SMSC LAN8742 PHY.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called s5l-fe.
++
+ endif # NET_VENDOR_APPLE
+diff --git a/drivers/net/ethernet/apple/Makefile b/drivers/net/ethernet/apple/Makefile
+index 322457027..8e8c09352 100644
+--- a/drivers/net/ethernet/apple/Makefile
++++ b/drivers/net/ethernet/apple/Makefile
+@@ -6,3 +6,4 @@
+ obj-$(CONFIG_MACE) += mace.o
+ obj-$(CONFIG_BMAC) += bmac.o
+ obj-$(CONFIG_MACMACE) += macmace.o
++obj-$(CONFIG_S5L_FE) += s5l-fe.o
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
 index 349aa3439..2b54e536c 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c

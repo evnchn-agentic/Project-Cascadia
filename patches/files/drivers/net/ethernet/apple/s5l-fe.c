@@ -4,8 +4,6 @@
  * LAN8742 PHY.  Register map reverse-engineered from iOS 8.4's AppleArasanFEController:
  * docs/research/j33i-arasan-fe-regmap.md.  Bring-up driver: one descriptor per frame,
  * no checksum offload, no multicast filter (promiscuous off, broadcast + own address).
- *
- * Lives under mach-apple for now only to avoid touching drivers/net glue.
  */
 #include <linux/clk.h>
 #include <linux/delay.h>
