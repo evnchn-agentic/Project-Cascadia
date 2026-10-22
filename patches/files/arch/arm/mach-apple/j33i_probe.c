@@ -14,6 +14,8 @@
 #include <linux/hrtimer.h>
 #include <linux/kernel_stat.h>
 #include <linux/string.h>
+#include <linux/of.h>
+#include <linux/reboot.h>
 
 #define J33I_GPIO28	0x3fa00070
 
@@ -205,5 +207,18 @@ static int __init atvprobe_fs(void) { atvprobe_fire("fs"); return 0; }
 fs_initcall(atvprobe_fs);
 static int __init atvprobe_devsync(void) { atvprobe_fire("devsync"); return 0; }
 device_initcall_sync(atvprobe_devsync);
-static int __init atvprobe_late(void) { atvprobe_fire("late"); return 0; }
+/* `reboot` on the Apple TV: the same reset line iBoot uses (without a handler, Linux only halts). */
+static int j33i_restart(struct sys_off_data *data)
+{
+	j33i_reset();
+	return NOTIFY_DONE;
+}
+
+static int __init atvprobe_late(void)
+{
+	if (of_machine_is_compatible("apple,j33iap"))
+		register_sys_off_handler(SYS_OFF_MODE_RESTART, SYS_OFF_PRIO_DEFAULT, j33i_restart, NULL);
+	atvprobe_fire("late");
+	return 0;
+}
 late_initcall(atvprobe_late);

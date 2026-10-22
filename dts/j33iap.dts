@@ -24,6 +24,7 @@
 
 	aliases {
 		serial0 = &uart3;
+		serial1 = &uart1;
 	};
 
 	chosen {
@@ -132,6 +133,19 @@
 				pins = "gpio18", "gpio19", "gpio20", "gpio21";
 				function = "periph";
 			};
+		};
+
+		/* UART1: the TI MSP430 that receives the IR remote and drives the front LED (ADT mcu0,
+		 * uart-comm "mcu-comm0"). 250000 8N1, CRC-16 framed (docs/research/j33i-mcu-protocol.md).
+		 * No pinctrl: the pins stay as iOS left them. uart0 is the MCU's bootloader link and
+		 * GPIO 0/1 its reset/test lines: never enable or touch those. */
+		uart1: serial@2600000 {
+			compatible = "apple,s5l8940x-uart", "apple,s5l-uart", "samsung,s3c6400-uart";
+			reg = <0x2600000 0x1000>;
+			interrupts = <22>;
+			clocks = <&uart_clk>, <&uart_clk>;
+			clock-names = "uart", "clk_uart_baud0";
+			status = "okay";
 		};
 
 		/* UART2: the BCM4334's Bluetooth half (ADT uart2/bluetooth "n88", module Monopoly OS,
