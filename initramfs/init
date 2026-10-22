@@ -138,6 +138,18 @@ msg "P105: ACM nodes: $(ls -d /dev/ttyGS* 2>/dev/null | tr '\n' ' ')"
 # nolock because NLM would want rpc.statd running locally, and nothing here
 # needs POSIX locks across the link.  vers=3 because macOS's nfsd serves v2/v3
 # only -- there is no v4 to negotiate.
+# Apple TV 3: its NFS root is over Ethernet, not the USB link, so eth0 has to be up with an address
+# first, and with its final MAC (stage 2 must not change it under a live NFS root). The MAC is the
+# unit's own (iOS en0), from /etc/eth0-mac, which build/keep carries into the image; Linux cannot
+# derive it this early (it comes from the Wi-Fi chip, which stage 2 powers up).
+if [ -f /etc/nfsroot ] && grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -e /sys/class/net/eth0 ]; then
+    [ -s /etc/eth0-mac ] && ip link set eth0 address "$(cat /etc/eth0-mac)"
+    ip link set eth0 up
+    e_i=0; while [ $e_i -lt 50 ] && [ "$(cat /sys/class/net/eth0/carrier 2>/dev/null)" != 1 ]; do e_i=$((e_i+1)); sleep 0.1; done
+    udhcpc -i eth0 -n -q -t 5 -T 2 >/tmp/udhcpc-stage1.log 2>&1 \
+        && msg "J33i: eth0 $(ip -4 addr show eth0 | awk '/inet /{print $2}') for the NFS root" \
+        || msg "J33i: no DHCP on eth0 -- the NFS root will fail and the RAM root is used"
+fi
 if [ -f /etc/nfsroot ] && [ -x /sbin/mount.nfs ]; then
     NFSROOT=$(cat /etc/nfsroot)
     msg "P105: trying NFS root $NFSROOT"

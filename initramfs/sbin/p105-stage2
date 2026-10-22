@@ -266,7 +266,9 @@ if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -x /sbin/pmu-gp
 fi
 # Apple TV 3 Ethernet (s5l_fe): up and on DHCP, so the box is reachable over the LAN with no
 # USB cable at all (the cable-free fsboot route).  udhcpc keeps retrying in the background.
-if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -e /sys/class/net/eth0 ]; then
+# On an NFS root stage 1 already set eth0 up (its MAC, its lease): leave it alone.
+if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -e /sys/class/net/eth0 ] \
+        && ! ip -4 addr show eth0 2>/dev/null | grep -q 'inet '; then
     # The real MAC sits in syscfg; Apple numbers en0 as the Wi-Fi chip's OTP address + 1, so take
     # it from wlan0 once brcmfmac has made it (~8 s in), else keep the driver's random one.
     ( for _ in $(seq 20); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
