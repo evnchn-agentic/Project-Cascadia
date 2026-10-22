@@ -3309,13 +3309,153 @@ only this passes), 32 x 32 of one -- which is why one-byte cube maps
 RGBA8; they are as they are now, and pass. dEQP-GLES2 whole: as at M38
 but for that case, fixed (texture.specification 192 of 192).
 
+**Float render targets.** A target of half floats keeps 64 bits a
+pixel: iOS's m28 (EXT_color_buffer_half_float) has `mov.f16 o0.xyzw,
+pa0.xyzw` for gl_FragColor -- o0 and o1, R G and B A -- and the PBE word
+0x07010000 (less the tiled bit: F16F16F16F16 0x01000000). What it took:
+
+- The program packs its colour with one VPCK F32 to F16 (the unorm8
+  pack's word with dest format 5, no scale, mask xyzw): o0 and o1 at
+  once. Two moves of raw words, `or o0, sa0` then `or o1, sa1` (the clear
+  quad's first form), or a LIMM into o1, never reached the target: o1
+  written alone is lost, so every float clear is a VPCK from four F32 in
+  sa too.
+- The tile keeps one register a pixel unless the 3D block's word +0x4c is
+  1: until then the PBE wrote o0's halves twice (R G R G). Which word was
+  found by running iOS's kext: `rtemu.py` (unicorn, the user's 8.4.1
+  kernelcache) runs its 3D block builder (0x80bf5eec) on the render
+  commands the capture logged for m25 (565) and m28 (half floats); the
+  blocks differ in that one word (the payload's word 34).
+- Blending reads the tile back with VPCK F16 to F32, R G from o0 and B A
+  as channels 2, 3 of the same pair (naming o1 read o0 again); SOP2's byte
+  blending, the F16 program path (M38) and logic ops are not for floats,
+  and nir_lower_blend is told the target is float (no clamping).
+- The background loads the target as a texture of its format handed back
+  as F16 (state word 3 bit 31) into two registers -- the PDS's iterate
+  size 0x52 and texture DOUT kind 0x024 of iOS's F16 lookups, patched into
+  the render's own copy of the PDS block (+0x144, +0x148) -- and our
+  program, iOS's `mov.f16 o0.xyzw, pa0.xyzw` (+0x120's DOUTU).
+
+The other kinds of tile (`enum sgx_rt_kind`): two half floats in o0 (RG16F
+F16F16 0x00810000, R16F F16 0xf0010000), an F32 in o0 (R32F F32
+0x10810000), two F32 in o0, o1 (RG32F F32F32 0x11010000; the colour and
+the background moved by a VPCK F32 to F32 of two channels, iterate size
+0x12). R11G11B10F (APPLE_color_buffer_packed_float on iOS): the tile's four
+half floats packed by the PBE with F11F11F10 0x21010000 and bit 25 --
+without it the PBE wrote o0's bits as they are (0x38003400 read back as
+2.0, 5.7e-6, 0.0039: R and G's halves). RGBA32F has no colour format of
+GXM's (64 bits at most): not a target yet. RGB16F is R16G16B16X16_FLOAT,
+its alpha 1 to blending (a target without alpha: Mesa leaves the
+destination alpha to drivers that have no per-target blending). glfmt:
+RGBA16F, RG16F, R16F, R32F, RG32F, R11G11B10F -- cleared, half drawn a
+render later, added to, times the destination's alpha, values past [0, 1]
+read back as floats.
+
+**sRGB targets** (EXT_framebuffer_sRGB, `caps.dest_surface_srgb_control`):
+the same bytes; the program encodes its colour and decodes the tile's for
+blending (nir_lower_blend leaves both to the driver: `lower_srgb_target`,
+nir_format_linear_to_srgb and back), a clear's colour encoded. And R G B A
+in memory (R8G8B8A8, GXM's ABGR: 0x00010000, loaded with swizzle 0).
+
+**Intensity, luminance and alpha targets.** With R8G8B8A8 renderable Mesa
+put GL_INTENSITY renderbuffers in it, and blending took the alpha drawn,
+not the intensity (piglit's fbo-blending-formats: 0.85 for 0.81); Mesa's
+own fix for that needs per-target blending, and makes the alpha 1. So
+they are targets of their own: I8 (written as R8, loaded RRRR -- the
+sampler's swizzle 3, found from L8's 5 and A8's 6), L8 (1RRR), L8A8 (U8U8
+written R then A: 0xb0b10000), A8 (U8 written from A: 0x80910000); an
+intensity target's colour goes R R R R into the tile, so a blend later in
+the same render reads the intensity as alpha. All of fbo-blending-formats
+passes now, the alpha, luminance and intensity formats that were
+incomplete before among them.
+
+**The rest of the list**, the draw module's where the hardware has not:
+
+- Instanced draws, instanced attributes, primitive restart (ARB_draw_
+  instanced, ARB_instanced_arrays, NV_primitive_restart): the vertex
+  shader on the CPU, the draw module's (`gpu_vs_can_draw` sends them
+  there). iOS has EXT_draw_instanced and EXT_instanced_arrays on the A5:
+  the GPU's way is there to find.
+- NV_conditional_render: the query waited for (or not, as the mode says),
+  draws, clears and blits skipped when its result says so.
+- ARB_timer_query: a render's GPU time is its fence's signal time -- the
+  kernel's dma-fence timestamp, read through a sync file
+  (SYNC_IOC_FILE_INFO) -- or the call's, if later (an idle GPU);
+  CLOCK_MONOTONIC both, `get_timestamp` the same. (ES 2.0 has no
+  GL_TIMESTAMP glGet in Mesa: ext_disjoint_timer_query's simple fails
+  there.)
+- ARB_vertex_type_2_10_10_10_rev: the packed formats are vertex formats
+  now, read by the draw module's translate.
+- ARB_blend_func_extended: blending is the program's; nir_lower_blend takes
+  the second colour in, and without blending it is dropped.
+- ARB_color_buffer_float (`caps.vertex_color_unclamped`).
+- ARB_uniform_buffer_object: constant buffers 1..15, read from memory
+  with VLDST as M32's uniforms are -- each buffer's address in an sa word
+  after the uniforms, the offset VLDST's immediate (words 0..127), a LIMM
+  past that, or the program's (a float: made a word index as
+  memory_uniform() makes one). NIR's block k is Mesa's constant buffer
+  k + 1 (lower_uniforms_to_ubo is off), and with the integers lowered to
+  floats a constant offset may come as a float's bits (16 bytes,
+  0x41800000). A block holds 64 KiB; one a program reads that is not
+  bound drops the draw. Both stages' default uniforms are OpenGL 3's 1024
+  components now (256 vec4s; the fragment shader had 64): past sa's words
+  in memory, as before.
+
+piglit, the build before against this one: the FBO, blending, sRGB,
+float, instancing, restart, conditional render, timer query, 10-10-10-2
+and dual-source groups 274 -> 409 passes; arb_uniform_buffer_object 33
+more (all of quick_gl's that run), with the glsl-1.10, glsl-1.20,
+shaders, ARB program and OpenGL 2 groups as they were; nothing that
+passed fails. dEQP-GLES2 whole: two cases more (texture.specification's
+cube_7, indexing.tmp_array's vec4_const_write_dynamic_read_fragment) and
+one less, fbo.completeness.renderable.texture.color0.rgb_half_float_oes
+-- Mesa's, not the driver's: EXT_color_buffer_half_float makes RGBA
+textures of type HALF_FLOAT_OES colour-renderable and not RGB ones, and
+Mesa takes the RGB16F it makes of them for the sized format. Exposed
+once RGB16F is a target (Mesa's CI lists the case as a failure for
+etnaviv, r300, crocus, panfrost T720 and a2xx); fixed in Mesa's
+gles_check_float_renderable(), carried in `mesa/mesa.patch` -- the fbo
+group 544 of 544 again.
+
+**ARB_depth_buffer_float.** The tiles hold F32 depth whatever the
+buffer's format (M23), so Z32_FLOAT is the ISP's F32 store, as Z16 and
+Z24X8 were. With stencil, ZLSCTL's 24-bit format would round the depth;
+the formats' field has a fourth value, 3 (bits 25:24 stored, 22:21
+loaded), which stores and loads both: F32 depth and the stencil in 5
+bytes a pixel, 5 KiB a tile. Its layout, from a pattern of known depths
+and stencils (`SGX_ZLS_*` knobs of a build of the time, a stencil
+1 + tile and single pixels marked; every pixel of a 256 x 256 buffer
+decoded right): each row of 32 pixels a stream of 160 bytes -- for each
+pixel the stencil, then the depth's bits as a key that sorts as an
+integer (a positive float's sign bit flipped, a negative one's every
+bit), most significant byte first -- each 16 bytes of the stream stored
+reversed; the tiles where the other formats have theirs, 5 KiB apart.
+`sgx_resource.c`'s CPU copies go through it both ways.
+
+What did not work: vitasdk's GXM depth/stencil formats read as ZLSCTL's
+bits (S8D24 0x01266000, D16 0x02444000, DF32M 0x00044000, DF32M_S8
+0x00066000), the last with a stencil surface of its own. Format 0 with
+the stencil bits, and a stencil buffer at the 3D block's +0x78 and +0x7c
+-- the microkernel loads ZLS registers 0x480..0x490 from +0x6c..+0x7c,
+0x48c and 0x490 the stencil's load and store bases by the kext's names;
+the kext fills both from iOS's payload word 32 (`rtemu.py` with each
+payload word marked), 0 on iOS -- stored no stencil there and loaded
+none, as an offset from the ZLS base or as an address, with bits 16 and
+17 either way.
+
+gldesk: GL_DEPTH32F_STENCIL8 and GL_DEPTH_COMPONENT32F over two renders,
+read back, and depths 1e-7 apart from the CPU through a render that loads
+and stores them, read back exactly (a 24-bit store would round them); 28
+of 28. piglit's depth and stencil groups 110 -> 174 passes, nothing that
+passed fails; what fails fails for 24-bit depth too (glDrawPixels and
+glCopyPixels of depth: gl_FragDepth; the border colour; depth mipmaps).
+
 **Gaps the new tests ran into** (they had been skipped): 3D textures --
 GL 1.2's, not there at all (`fbo-incomplete`, `fbo-generatemipmap-3d`);
 the border colour (every `texwrap formats bordercolor`); `gl_FragDepth`
 (`depth-clear-precision-check`); a sampler LOD bias past +4 (word 0's field
 is -3.875 .. 4: `tex-miplevel-selection` with a bias of 5); gl_PointCoord;
-MSAA (`ext_framebuffer_multisample` with 0 samples); sRGB render targets
-(`cubemap-getteximage-pbo`).
+MSAA (`ext_framebuffer_multisample` with 0 samples).
 
 ## Testing, without and with the device
 
