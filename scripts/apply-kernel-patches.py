@@ -43,6 +43,7 @@ NEW_FILES = [
     "arch/arm/mach-apple/apple_pmu_clkevt.c",
     "arch/arm/mach-apple/apple_sof_clkevt.c",
     "arch/arm/mach-apple/j33i_probe.c",
+    "arch/arm/mach-apple/j33i_display.c",
     "arch/arm/mach-apple/p105_fb_dbg.c",
     "arch/arm/mach-apple/p105_fb_dbg.h",
     "arch/arm/mach-apple/font8x8.h",
