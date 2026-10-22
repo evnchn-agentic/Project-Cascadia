@@ -12,7 +12,7 @@
  *   - DRAM is 0x80000000 + 0x1F570000 (hw.memsize), /vram right above it;
  *   - the boot console is uart3 (0x32800000).  uart0 talks to the IR/LED
  *     MCU here, so nothing in this file touches it.
- * Not described yet: HDMI audio.
+ * HDMI audio: sound/soc/apple/s5l-hdmi.c, docs/research/j33i-audio.md.
  */
 
 / {
@@ -208,6 +208,52 @@
 			compatible = "apple,s5l8940x-pmgr", "syscon";
 			reg = <0xf100000 0x7000>;
 			status = "disabled";
+		};
+
+		/* Audio power states (decoded from the 44-byte device-clocks table): AUDIO
+		 * (id 46), I2S (id 47, one gate for every I2S port, child of AUDIO) and
+		 * CDMA (id 85).  s5l-hdmi holds all three while bound (one also feeds Ethernet). */
+		audio_ps: audio-ps@f10109c {
+			compatible = "apple,s5l8940x-pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0xf10109c 0x4>;
+			clocks = <&uart_clk>;
+			clock-output-names = "audio_ps";
+		};
+
+		i2s_ps: i2s-ps@f1010a0 {
+			compatible = "apple,s5l8940x-pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0xf1010a0 0x4>;
+			clocks = <&audio_ps>;
+			clock-output-names = "i2s_ps";
+		};
+
+		cdma_ps: cdma-ps@f101078 {
+			compatible = "apple,s5l8940x-pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0xf101078 0x4>;
+			clocks = <&uart_clk>;
+			clock-output-names = "cdma_ps";
+		};
+
+		/* HDMI audio: I2S0 sends the samples, slave to the I2S master's clocks
+		 * (NCO 0, 342 MHz reference); CDMA channel 0x17 on request 1 (the ADT's
+		 * i2s0 dma-channels) feeds it; the HDMI TX's I2S receiver takes them.
+		 * The windows: I2S master, I2S0, HDMI CTRL, CORE and I2S receiver, the
+		 * PMGR's NCOs, CDMA.  The HDMI TX itself stays iBoot's (the console). */
+		hdmi_audio: audio-controller@4190000 {
+			compatible = "apple,s5l8947x-hdmi-audio";
+			reg = <0x4190000 0x1000>, <0x4195000 0x1000>,
+			      <0x9700000 0x1000>, <0x9710000 0x1000>,
+			      <0x9740000 0x1000>, <0xf100110 0x70>,
+			      <0x7000000 0x2d000>;
+			reg-names = "i2s", "i2s-master", "hdmi-ctrl", "hdmi-core",
+				    "hdmi-i2s", "nco", "cdma";
+			clocks = <&audio_ps>, <&i2s_ps>, <&cdma_ps>;
+			clock-names = "audio", "i2s", "cdma";
+			apple,dma-channel = <0x17 1>;
+			apple,nco-reference-hz = <342000000>;
 		};
 
 		otgphy: phy@6000000 {

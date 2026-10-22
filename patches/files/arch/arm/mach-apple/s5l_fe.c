@@ -141,27 +141,34 @@ static void fe_rx(struct fe_priv *p)
 		unsigned int i = p->rx_next;
 		u32 st = le32_to_cpu(p->rx[i].status);
 		struct sk_buff *skb = p->rx_skb[i];
-		unsigned int len;
+		dma_addr_t map = p->rx_map[i];
+		unsigned int len = st & D_RX_LEN;
+		bool bad = (st & D_RX_ERR) || len < ETH_ZLEN + 4 || len > BUF_SZ;
 
 		if (st & D_OWN)
 			break;
 		dma_rmb();
-		dma_unmap_single(p->dev, p->rx_map[i], BUF_SZ, DMA_FROM_DEVICE);
-		len = st & D_RX_LEN;
-		if ((st & D_RX_ERR) || len < ETH_ZLEN + 4 || len > BUF_SZ) {
-			ndev->stats.rx_errors++;
-			dev_kfree_skb_irq(skb);
-		} else {
-			skb_put(skb, len - 4);	/* the length includes the CRC */
-			skb->protocol = eth_type_trans(skb, ndev);
-			ndev->stats.rx_packets++;
-			ndev->stats.rx_bytes += len - 4;
-			netif_rx(skb);
-		}
-		p->rx_skb[i] = NULL;
-		if (fe_rx_fill(p, i))
-			ndev->stats.rx_dropped++;
 		p->rx_next = (i + 1) % RING;
+		/* A bad frame, or no buffer to replace this one: hand the same buffer back, so the
+		 * ring never loses a slot (a lost slot ends in a "no RX buffer" interrupt storm). */
+		if (bad || fe_rx_fill(p, i)) {
+			if (bad)
+				ndev->stats.rx_errors++;
+			else
+				ndev->stats.rx_dropped++;
+			p->rx_skb[i] = skb;
+			p->rx_map[i] = map;
+			p->rx[i].buf = cpu_to_le32(map);
+			dma_wmb();
+			p->rx[i].status = cpu_to_le32(D_OWN);
+			continue;
+		}
+		dma_unmap_single(p->dev, map, BUF_SZ, DMA_FROM_DEVICE);
+		skb_put(skb, len - 4);	/* the length includes the CRC */
+		skb->protocol = eth_type_trans(skb, ndev);
+		ndev->stats.rx_packets++;
+		ndev->stats.rx_bytes += len - 4;
+		netif_rx(skb);
 	}
 	fe_w(p, FE_RX_POLL, 1);
 }
@@ -194,12 +201,10 @@ static irqreturn_t fe_irq(int irq, void *data)
 		return IRQ_NONE;
 	fe_w(p, FE_ISR, st);
 	spin_lock(&p->lock);
-	if (st & FE_IRQ_RX)
+	if (st & (FE_IRQ_RX | FE_IRQ_RXNB))	/* ring full: drain it, then poll */
 		fe_rx(p);
 	if (st & FE_IRQ_TX)
 		fe_tx_done(p);
-	if (st & FE_IRQ_RXNB)
-		fe_w(p, FE_RX_POLL, 1);
 	if (st & FE_IRQ_STAT)
 		fe_w(p, FE_STAT_IRQ, fe_r(p, FE_STAT_IRQ));
 	spin_unlock(&p->lock);

@@ -155,6 +155,11 @@ if grep -q "^CONFIG_SND_SOC_APPLE_S5L_AUDIO=y" "$TREE/.config"; then
 else
     echo "    note: CONFIG_SND_SOC_APPLE_S5L_AUDIO did not survive olddefconfig -- no sound"
 fi
+if grep -q "^CONFIG_SND_SOC_APPLE_S5L_HDMI=y" "$TREE/.config"; then
+    echo "    ok: CONFIG_SND_SOC_APPLE_S5L_HDMI"
+else
+    echo "    note: CONFIG_SND_SOC_APPLE_S5L_HDMI did not survive olddefconfig -- no HDMI sound"
+fi
 
 echo "==> Building zImage with -j$JOBS (log: logs/kernel-build.log)"
 make -C "$TREE" -j"$JOBS" zImage > "$LOGS/kernel-build.log" 2>&1

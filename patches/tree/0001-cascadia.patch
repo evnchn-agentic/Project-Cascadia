@@ -1605,10 +1605,10 @@ index 0bbad90dd..34eeb6dd6 100644
  					   HCI_ADV_PHY_1M, 0, rssi,
  					   info->data, info->length, false,
 diff --git a/sound/soc/apple/Kconfig b/sound/soc/apple/Kconfig
-index 793f7782e..70a816e90 100644
+index 793f7782e..3e59f83c9 100644
 --- a/sound/soc/apple/Kconfig
 +++ b/sound/soc/apple/Kconfig
-@@ -6,3 +6,14 @@ config SND_SOC_APPLE_MCA
+@@ -6,3 +6,23 @@ config SND_SOC_APPLE_MCA
  	help
  	  This option enables an ASoC platform driver for MCA peripherals found
  	  on Apple Silicon SoCs.
@@ -1623,17 +1623,28 @@ index 793f7782e..70a816e90 100644
 +	  The iPad mini 1 (A5, S5L8942X) speakers: the MCA audio port, its
 +	  CDMA channel and the clocks and pin routing they need, as an ALSA
 +	  card with the two CS35L19 amplifiers.
++
++config SND_SOC_APPLE_S5L_HDMI
++	tristate "Apple TV 3 HDMI audio (Apple S5L8947X I2S, CDMA)"
++	depends on ARCH_APPLE_S5L || COMPILE_TEST
++	default ARCH_APPLE_S5L
++	help
++	  The Apple TV 3 (S5L8947X) HDMI audio: I2S0 fed by its CDMA channel
++	  into the HDMI transmitter's I2S receiver, as a plain ALSA card with
++	  one stereo 16-bit playback device.
 diff --git a/sound/soc/apple/Makefile b/sound/soc/apple/Makefile
-index 1eb8fbef6..75185dfb5 100644
+index 1eb8fbef6..116f83173 100644
 --- a/sound/soc/apple/Makefile
 +++ b/sound/soc/apple/Makefile
-@@ -1,3 +1,6 @@
+@@ -1,3 +1,8 @@
  snd-soc-apple-mca-y	:= mca.o
  
  obj-$(CONFIG_SND_SOC_APPLE_MCA)	+= snd-soc-apple-mca.o
 +
 +snd-soc-apple-s5l-audio-y	:= s5l-audio.o
 +obj-$(CONFIG_SND_SOC_APPLE_S5L_AUDIO)	+= snd-soc-apple-s5l-audio.o
++snd-soc-apple-s5l-hdmi-y	:= s5l-hdmi.o
++obj-$(CONFIG_SND_SOC_APPLE_S5L_HDMI)	+= snd-soc-apple-s5l-hdmi.o
 diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
 index 709284248..b79cfc97c 100644
 --- a/sound/soc/codecs/Kconfig
