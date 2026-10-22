@@ -167,3 +167,18 @@ before committing.
 - Whether the iPad's 102.6 MHz GPU clock is a limit for 720p YUV compositing
   (it is ample: 1280x720x30 fps is a trivial fill).
 - The exact VXD390 interface (MTX firmware or fixed register file).
+
+## Measured: software H.264 decode on the box (2026-10-22 15:36)
+
+`ffmpeg -benchmark -threads 1 -i clip -f null -` (Alpine 3.24 ffmpeg, NEON), 10 s testsrc2 clips, x264 High,
+yuv420p, 30 fps, made on the Mac:
+
+| Resolution | Bitrate | Decode | Real time |
+|---|---|---|---|
+| 854x480 | 1.2 Mbit/s | 60 fps | 2.01x |
+| 1280x720 | 2.5 Mbit/s | 29 fps | 0.97x |
+| 1920x1080 | 5 Mbit/s | 14 fps | 0.45x |
+
+This is decode only (no colour conversion or display). 480p has headroom for conversion and audio; 720p30 is at
+the limit, so it needs the YUV-to-RGB step on the GPU (mpv `--vo=gpu` on the SGX Mesa) and probably
+`-skip_loop_filter` to play smoothly; 1080p needs the VXD390.
