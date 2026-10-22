@@ -2154,7 +2154,8 @@ gpu_vs_can_draw(struct sgx_context *ctx, const struct pipe_draw_info *info)
    if (info->mode != MESA_PRIM_TRIANGLES && info->mode != MESA_PRIM_TRIANGLE_STRIP &&
        info->mode != MESA_PRIM_TRIANGLE_FAN)
       return false;
-   if (info->primitive_restart || info->instance_count != 1 ||
+   /* (instances and restarts: the draw module's, M43) */
+   if (info->primitive_restart || info->instance_count != 1 || info->start_instance ||
        r->cull_face == PIPE_FACE_FRONT_AND_BACK ||
        r->fill_front != PIPE_POLYGON_MODE_FILL || r->fill_back != PIPE_POLYGON_MODE_FILL ||
        r->clip_plane_enable ||
@@ -2476,6 +2477,9 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    unsigned i;
 
    if (indirect || !draw || !ctx->vs || !ctx->vs->draw)
+      return;
+   /* (M43) under a render condition that says no: nothing */
+   if (!sgx_render_condition_ok(ctx))
       return;
    ctx->stat_draws += num_draws;
    if (ctx->stat_swap) {

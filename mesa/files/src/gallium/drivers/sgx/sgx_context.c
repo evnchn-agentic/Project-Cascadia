@@ -219,7 +219,8 @@ sgx_create_query(struct pipe_context *pctx, unsigned type, unsigned index)
    struct sgx_query *q;
 
    if (type != PIPE_QUERY_OCCLUSION_COUNTER && type != PIPE_QUERY_OCCLUSION_PREDICATE &&
-       type != PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE)
+       type != PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE && type != PIPE_QUERY_TIMESTAMP &&
+       type != PIPE_QUERY_TIME_ELAPSED)
       return NULL;
    if (!(q = CALLOC_STRUCT(sgx_query)))
       return NULL;
@@ -238,7 +239,22 @@ sgx_destroy_query(struct pipe_context *pctx, struct pipe_query *pq)
       ctx->query = NULL;
    }
    query_release(q);
+   sgx_fence_reference(&q->begin_fence, NULL);
    FREE(q);
+}
+
+static bool
+timer_query(const struct sgx_query *q)
+{
+   return q->type == PIPE_QUERY_TIMESTAMP || q->type == PIPE_QUERY_TIME_ELAPSED;
+}
+
+/* the GPU's time at a point of the stream: when the render before it was
+ * done, or when the point was reached, if later (an idle GPU) */
+static uint64_t
+gpu_time(struct sgx_fence *f, uint64_t cpu)
+{
+   return MAX2(f ? sgx_fence_signal_time(f) : 0, cpu);
 }
 
 static bool
@@ -248,6 +264,11 @@ sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
    struct sgx_query *q = (struct sgx_query *)pq;
 
    sgx_batch_flush(ctx);
+   if (timer_query(q)) {
+      sgx_fence_reference(&q->begin_fence, ctx->last);
+      q->begin_cpu = os_time_get_nano();
+      return true;
+   }
    query_release(q);
    q->samples = 0;
    ctx->query = q;
@@ -263,6 +284,7 @@ sgx_end_query(struct pipe_context *pctx, struct pipe_query *pq)
    if (ctx->query == (struct sgx_query *)pq)
       ctx->query = NULL;
    sgx_fence_reference(&((struct sgx_query *)pq)->last, ctx->last);
+   ((struct sgx_query *)pq)->end_cpu = os_time_get_nano();
    return true;
 }
 
@@ -274,6 +296,15 @@ sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq, bool wait
 
    if (q->last && !sgx_fence_wait(q->last, wait ? OS_TIMEOUT_INFINITE : 0))
       return false;
+   if (timer_query(q)) {
+      uint64_t end = gpu_time(q->last, q->end_cpu);
+
+      if (q->type == PIPE_QUERY_TIMESTAMP)
+         result->u64 = end;
+      else
+         result->u64 = end - MIN2(end, gpu_time(q->begin_fence, q->begin_cpu));
+      return true;
+   }
    for (unsigned i = 0; i < q->nbo; i++)
       if (!wait && !sgx_bo_idle(q->bo[i]))
          return false;
@@ -291,6 +322,39 @@ static void
 sgx_set_active_query_state(struct pipe_context *pctx, bool enable)
 {
    sgx_context(pctx)->queries_off = !enable;
+}
+
+/* ---- conditional rendering (M43: NV_conditional_render) ----------------- */
+
+static void
+sgx_render_condition(struct pipe_context *pctx, struct pipe_query *query, bool condition,
+                     enum pipe_render_cond_flag mode)
+{
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   ctx->cond_query = query;
+   ctx->cond_condition = condition;
+   ctx->cond_mode = mode;
+}
+
+/* Rendering goes ahead when the query's result (samples passed, or any)
+ * differs from the condition -- gallium's rule; a result not there yet, a
+ * mode that does not wait: ahead too, as GL allows */
+bool
+sgx_render_condition_ok(struct sgx_context *ctx)
+{
+   union pipe_query_result r;
+   bool wait, value;
+
+   if (!ctx->cond_query)
+      return true;
+   wait = ctx->cond_mode == PIPE_RENDER_COND_WAIT ||
+          ctx->cond_mode == PIPE_RENDER_COND_BY_REGION_WAIT;
+   if (!sgx_get_query_result(&ctx->base, ctx->cond_query, wait, &r))
+      return true;
+   value = ((struct sgx_query *)ctx->cond_query)->type == PIPE_QUERY_OCCLUSION_COUNTER ?
+           r.u64 != 0 : r.b;
+   return value != ctx->cond_condition;
 }
 
 /* ---- clears ------------------------------------------------------------- */
@@ -345,6 +409,9 @@ sgx_clear(struct pipe_context *pctx, unsigned buffers, uint32_t color_clear_mask
    bool zs_whole = zs && ctx->fb.width >= u_minify(zs->width0, ctx->fb.zsbuf.level) &&
                    ctx->fb.height >= u_minify(zs->height0, ctx->fb.zsbuf.level);
 
+   /* (M43) under a render condition that says no: nothing */
+   if (!sgx_render_condition_ok(ctx))
+      return;
    /* depth and stencil first (the colour's quad would end a render's
     * start): at a render's start, all of the target, the depth the render
     * starts at and its stencil 0 for free; else a quad in the render (M24) */
@@ -384,6 +451,8 @@ sgx_clear_render_target(struct pipe_context *pctx, struct pipe_surface *dst,
                         const union pipe_color_union *color, unsigned x, unsigned y,
                         unsigned w, unsigned h, bool render_condition_enabled)
 {
+   if (render_condition_enabled && !sgx_render_condition_ok(sgx_context(pctx)))
+      return;
    sgx_batch_flush(sgx_context(pctx));
    if (!x && !y && w == dst->texture->width0 && h == dst->texture->height0 &&
        sgx_clear_gpu(sgx_context(pctx), dst, color))
@@ -396,6 +465,8 @@ sgx_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
                         unsigned flags, double depth, unsigned stencil, unsigned x,
                         unsigned y, unsigned w, unsigned h, bool render_condition_enabled)
 {
+   if (render_condition_enabled && !sgx_render_condition_ok(sgx_context(pctx)))
+      return;
    sgx_batch_flush(sgx_context(pctx));
    util_clear_depth_stencil(pctx, dst, flags, depth, stencil, x, y, w, h);
 }
@@ -561,6 +632,8 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
    struct pipe_blit_info part = *info;
 
+   if (info->render_condition_enable && !sgx_render_condition_ok(sgx_context(pctx)))
+      return;
    if (util_try_blit_via_copy_region(pctx, info, false))
       return;
    /* colour, then depth and stencil (M43: glBlitFramebuffer's mask may
@@ -1015,6 +1088,7 @@ sgx_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    p->begin_query = sgx_begin_query;
    p->end_query = sgx_end_query;
    p->get_query_result = sgx_get_query_result;
+   p->render_condition = sgx_render_condition;
    p->set_active_query_state = sgx_set_active_query_state;
    p->resource_release = u_default_resource_release;
 

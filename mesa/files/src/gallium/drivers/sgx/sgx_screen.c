@@ -208,9 +208,14 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       }
    }
    if (usage & PIPE_BIND_VERTEX_BUFFER) {
+      /* (M43: the packed 10-10-10-2 ones too -- ARB_vertex_type_2_10_10_10_rev
+       * -- which the fetch has not: the draw module's translate reads them,
+       * the vertex shader on the CPU, gpu_vs_can_draw) */
       if (!desc->is_array && format != PIPE_FORMAT_R32_FLOAT &&
           format != PIPE_FORMAT_R32G32_FLOAT && format != PIPE_FORMAT_R32G32B32_FLOAT &&
-          format != PIPE_FORMAT_R32G32B32A32_FLOAT)
+          format != PIPE_FORMAT_R32G32B32A32_FLOAT &&
+          !(desc->nr_channels == 4 && desc->channel[0].size == 10 &&
+            desc->channel[3].size == 2))
          return false;
    }
    if (usage & PIPE_BIND_INDEX_BUFFER) {
@@ -287,9 +292,29 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    /* a view's swizzle: the program's, after the lookup (M43:
     * EXT_texture_swizzle; sgx_blend_key's tex_swizzle) */
    caps->texture_swizzle = true;
+   /* vertex colours as the program wrote them: the varyings go unclamped
+    * (F32 or F16), the state tracker clamps where GL says (M43:
+    * ARB_color_buffer_float) */
+   caps->vertex_color_unclamped = true;
+   /* (M43) instanced draws, instanced attributes and primitive restart:
+    * the draw module's, the vertex shader on the CPU (gpu_vs_can_draw);
+    * conditional rendering: the query waited for (sgx_render_condition_ok) */
+   caps->vs_instanceid = true;
+   caps->vertex_element_instance_divisor = true;
+   caps->primitive_restart = true;
+   caps->primitive_restart_fixed_index = true;
+   caps->conditional_render = true;
    /* (M43) EXT_framebuffer_sRGB: a surface's format says whether the
     * program encodes (sgx_blend_key's rt_srgb) */
    caps->dest_surface_srgb_control = true;
+   /* (M43) ARB_blend_func_extended: blending is the program's, the second
+    * colour another output nir_lower_blend takes in */
+   caps->max_dual_source_render_targets = 1;
+   /* (M43) ARB_timer_query: the GPU's times are its fences' signal times
+    * (CLOCK_MONOTONIC, the kernel's), screen->get_timestamp the same clock */
+   caps->query_timestamp = true;
+   caps->query_time_elapsed = true;
+   caps->timer_resolution = 1;
    caps->max_texture_2d_size = 4096;      /* iOS's on the A5; SGX_RT_MAX_SIZE */
    caps->max_texture_cube_levels = 12;
    caps->max_texture_3d_levels = 0;
@@ -318,6 +343,12 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_texture_lod_bias = 15.0f;
 }
 
+static uint64_t
+sgx_get_timestamp(struct pipe_screen *pscreen)
+{
+   return os_time_get_nano();
+}
+
 struct pipe_screen *
 sgx_screen_create(int fd, const struct pipe_screen_config *config, struct renderonly *ro)
 {
@@ -337,6 +368,7 @@ sgx_screen_create(int fd, const struct pipe_screen_config *config, struct render
    screen->base.get_device_vendor = sgx_get_device_vendor;
    screen->base.get_screen_fd = sgx_get_screen_fd;
    screen->base.is_format_supported = sgx_is_format_supported;
+   screen->base.get_timestamp = sgx_get_timestamp;
    screen->base.context_create = sgx_context_create;
    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
       screen->base.nir_options[i] = &sgx_nir_options;

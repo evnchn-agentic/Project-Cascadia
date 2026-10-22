@@ -1430,6 +1430,10 @@ intrinsic(struct comp *c, nir_intrinsic_instr *in)
          }
          return;
       }
+      /* (M43) the second colour of dual-source blending: nir_lower_blend
+       * took it into the blending; with no blending, nothing */
+      if (nir_intrinsic_io_semantics(in).dual_source_blend_index)
+         return;
       if (loc != FRAG_RESULT_COLOR && loc != FRAG_RESULT_DATA0) {
          fail(c, "output %s", gl_frag_result_name(loc));
          return;

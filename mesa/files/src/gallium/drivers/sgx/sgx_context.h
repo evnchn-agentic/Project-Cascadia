@@ -79,10 +79,16 @@ struct sgx_query {
     * render before is done, its own or not (piglit's occlusion_query_order:
     * a query with no draws after others) */
    struct sgx_fence *last;
+   /* (M43) TIMESTAMP and TIME_ELAPSED: the render before each end (and its
+    * call's time), the GPU's time there the later of the two */
+   struct sgx_fence *begin_fence;
+   uint64_t begin_cpu, end_cpu;
 };
 
 /* a render's visibility buffer for q, busy with it (sgx_batch_flush) */
 void sgx_query_add(struct sgx_query *q, struct sgx_bo *bo);
+/* whether rendering goes ahead under the render condition (M43) */
+bool sgx_render_condition_ok(struct sgx_context *ctx);
 
 #define SGX_BATCH_VCHUNKS 40
 #define SGX_BATCH_VCHUNK  (256u << 10)
@@ -217,6 +223,11 @@ struct sgx_context {
    struct sgx_batch batch;
    struct sgx_query *query;             /* the active occlusion query (M37) */
    bool queries_off;                    /* (set_active_query_state: meta ops) */
+   /* (M43) conditional rendering (NV_conditional_render): the query whose
+    * result decides, render_condition()'s condition and mode */
+   struct pipe_query *cond_query;
+   bool cond_condition;
+   enum pipe_render_cond_flag cond_mode;
    const float *fs_constants;
    unsigned fs_constants_size;  /* bytes */
    bool warned_fs, debug_draw;
