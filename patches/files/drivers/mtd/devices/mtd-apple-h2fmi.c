@@ -21,6 +21,14 @@
  * which is also how the verified raw dumps in docs are laid out, so a fresh
  * read can be diffed against them byte for byte.
  *
+ * The Apple TV 3 (J33i, S5L8947X, "apple,s5l8947x-fmi") has the same
+ * controller at the same address with the same PPN part, but one bus: one
+ * package on CE0 of FMI0 (ADT ce-bitmap 1), so 2 dies.  Its node carries only
+ * bus 0's three windows plus the two PMGR gate words of FMI0, and the driver
+ * refuses to probe unless iBoot left those gates on and the FMC in DDR -- the
+ * state every sequence below assumes.  FMI1 is never mapped there: iBoot
+ * clocks it although nothing is behind it, and a read on it would wedge.
+ *
  * READ ONLY, and structurally so: the opcode allowlist below has no program
  * (80/10, PPN boot page 8A/17) and no erase (60/D0, PPN 67) in it, and there
  * is no code path that could issue one.  Writing is a separate job that costs
@@ -35,10 +43,11 @@
 #include <linux/module.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
-#define H2FMI_BUSES		2
+#define H2FMI_BUSES		2		/* at most; see struct h2fmi_variant */
 #define H2FMI_CAUS		2
 #define H2FMI_DIES		(H2FMI_BUSES * H2FMI_CAUS)
 #define H2FMI_BLOCKS		1064
@@ -127,8 +136,20 @@ struct h2fmi_die {
 	u8 cau;
 };
 
+/* What differs between the boards: how many buses have a package, and whether
+ * probe has to see iBoot's clock gates first (the node then has one more
+ * window, the PMGR gate words of FMI0, after the buses' own). */
+struct h2fmi_variant {
+	u8 nbuses;
+	bool check_gates;
+};
+
+static const struct h2fmi_variant h2fmi_p105 = { .nbuses = 2 };
+static const struct h2fmi_variant h2fmi_j33i = { .nbuses = 1, .check_gates = true };
+
 struct h2fmi {
 	struct device *dev;
+	const struct h2fmi_variant *var;
 	struct h2fmi_bus bus[H2FMI_BUSES];
 	struct mtd_info mtd[H2FMI_DIES];
 	struct h2fmi_die die[H2FMI_DIES];
@@ -564,8 +585,9 @@ static int h2fmi_setup_mtd(struct h2fmi *fmi, int idx)
 
 static int h2fmi_probe(struct platform_device *pdev)
 {
+	const struct h2fmi_variant *var = of_device_get_match_data(&pdev->dev);
 	struct h2fmi *fmi;
-	int i, ret;
+	int i, ret, dies;
 
 	BUILD_BUG_ON(H2FMI_PAGE_DATA != (1 << H2FMI_PAGE_SHIFT));
 	BUILD_BUG_ON(H2FMI_PAGES != (1 << H2FMI_PAGES_SHIFT));
@@ -575,9 +597,37 @@ static int h2fmi_probe(struct platform_device *pdev)
 	if (!fmi)
 		return -ENOMEM;
 	fmi->dev = &pdev->dev;
+	if (!var || !var->nbuses || var->nbuses > H2FMI_BUSES)
+		return -EINVAL;
+	fmi->var = var;
+	dies = var->nbuses * H2FMI_CAUS;
 
-	/* Six regions, in the ADT's order: FMI, FMC, ECC for bus 0, then bus 1. */
-	for (i = 0; i < H2FMI_BUSES; i++) {
+	/* The gate words are PMGR's, shared with other clocks: mapped, not
+	 * requested, and only ever read.  Bits 7:4 are the state iBoot's
+	 * clock_gate() waits for (0xf = on).  An unclocked FMI must not be
+	 * touched at all, so this comes before the first FMI/FMC access. */
+	if (var->check_gates) {
+		struct resource *r = platform_get_resource(pdev, IORESOURCE_MEM,
+							   var->nbuses * 3);
+		void __iomem *g;
+		u32 a, b;
+
+		if (!r || resource_size(r) < 8)
+			return dev_err_probe(&pdev->dev, -EINVAL, "no PMGR gate window\n");
+		g = devm_ioremap(&pdev->dev, r->start, resource_size(r));
+		if (!g)
+			return -ENOMEM;
+		a = readl(g);
+		b = readl(g + 4);
+		if ((a & 0xf0) != 0xf0 || (b & 0xf0) != 0xf0)
+			return dev_err_probe(&pdev->dev, -ENODEV,
+					     "FMI0 clock gates off (0x%08x 0x%08x); not touching it\n",
+					     a, b);
+	}
+
+	/* Three regions per bus, in the ADT's order: FMI, FMC, ECC for bus 0,
+	 * then bus 1. */
+	for (i = 0; i < var->nbuses; i++) {
 		struct h2fmi_bus *b = &fmi->bus[i];
 
 		b->fmi = devm_platform_ioremap_resource(pdev, i * 3 + 0);
@@ -600,9 +650,13 @@ static int h2fmi_probe(struct platform_device *pdev)
 		 * state this driver would have to restore is not known. */
 		dev_info(&pdev->dev, "bus %d: FMC_ON=0x%08x IF_CTRL=0x%08x\n",
 			 i, readl(b->fmc + FMC_ON), readl(b->fmc + FMC_IF_CTRL));
+		if (var->check_gates && readl(b->fmc + FMC_ON) != 5)
+			return dev_err_probe(&pdev->dev, -ENODEV,
+					     "bus %d not in DDR (FMC_ON 0x%x, iBoot leaves 5); not driving it\n",
+					     i, readl(b->fmc + FMC_ON));
 	}
 
-	for (i = 0; i < H2FMI_DIES; i++) {
+	for (i = 0; i < dies; i++) {
 		ret = h2fmi_setup_mtd(fmi, i);
 		if (ret) {
 			while (--i >= 0)
@@ -613,7 +667,7 @@ static int h2fmi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, fmi);
 	dev_info(&pdev->dev, "%d dies, %u blocks of %u KiB each, read-only\n",
-		 H2FMI_DIES, H2FMI_BLOCKS, H2FMI_ERASESIZE / 1024);
+		 dies, H2FMI_BLOCKS, H2FMI_ERASESIZE / 1024);
 	return 0;
 }
 
@@ -622,12 +676,13 @@ static void h2fmi_remove(struct platform_device *pdev)
 	struct h2fmi *fmi = platform_get_drvdata(pdev);
 	int i;
 
-	for (i = 0; i < H2FMI_DIES; i++)
+	for (i = 0; i < fmi->var->nbuses * H2FMI_CAUS; i++)
 		mtd_device_unregister(&fmi->mtd[i]);
 }
 
 static const struct of_device_id h2fmi_of_match[] = {
-	{ .compatible = "apple,s5l8940x-fmi" },
+	{ .compatible = "apple,s5l8940x-fmi", .data = &h2fmi_p105 },
+	{ .compatible = "apple,s5l8947x-fmi", .data = &h2fmi_j33i },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, h2fmi_of_match);

@@ -338,6 +338,29 @@
 			status = "okay";
 		};
 
+		/* The NAND, READ-ONLY, and OFF: status "disabled" until the first
+		 * on-box test (docs/research/j33i-nand.md) has passed.  One Hynix PPN
+		 * on CE0 of FMI0 (live IORegistry: #ce 1, ce-bitmap 1, #databus 1,
+		 * IODeviceMemory 0x31200000/0x31240000/0x31280000), so only bus 0's
+		 * three windows -- FMI, FMC, ECC -- and the ADT's first interrupt.
+		 * FMI1 (0x1300000..) is left out on purpose: iBoot clocks it
+		 * (h2fmi_init_minimal runs for both buses) but nothing is behind it,
+		 * and a data read there wedges the bus.  The fourth window is
+		 * PMGR's FMI0 / FMI0-BCH gate words (device-clocks ids 59/60, power
+		 * index 49/50; iBoot clock_gate(0x2f/0x30) = 0x3f101008 + 4 * id):
+		 * the driver only reads them, and refuses to probe if iBoot left
+		 * them off or the bus out of DDR.  Its own compatible, so the P105
+		 * two-bus match can never bind here. */
+		nand: flash-controller@1200000 {
+			compatible = "apple,s5l8947x-fmi";
+			reg = <0x1200000 0x1000>,	/* FMI0 */
+			      <0x1240000 0x1000>,	/* FMC0 */
+			      <0x1280000 0x1000>,	/* ECC0 */
+			      <0xf1010c4 0x8>;		/* PMGR FMI0 gates, read only */
+			interrupts = <33>;
+			status = "disabled";
+		};
+
 		dwc2: usb@6100000 {
 			compatible = "apple,s5l8940x-dwc2", "snps,dwc2";
 			reg = <0x6100000 0x10000>;

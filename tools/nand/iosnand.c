@@ -15,14 +15,19 @@
  *   iosnand scan               bring the cache up to date, print what changed
  *   iosnand parts              the LwVM partitions on disk0
  *   iosnand read LBA [N]       N x 4 KB of disk0 to stdout
+ *   iosnand hfs [NAME]         the HFS+ / HFSX volume header of a partition
+ *                              (default: System) and its volume name
  *   iosnand serve [NAME...]    attach LwVM partitions (default: System) to
  *                              /dev/nbd0, /dev/nbd1 ... and serve them until
  *                              SIGTERM; read-only, writes are refused
  *
- * The cache is /var/lib/iosnand/pages.v1 (IOSNAND_CACHE overrides).  Both NAND
- * buses stay locked while iosnand runs.  Build:
+ * The cache is /var/lib/iosnand/pages.v1 (IOSNAND_CACHE overrides).  Every NAND
+ * bus stays locked while iosnand runs.  Build:
  *   arm-linux-gnueabihf-gcc -static -O2 -D_FILE_OFFSET_BITS=64 -o iosnand \
  *       tools/nand/iosnand.c tools/nand/ppn.c
+ * With -DPPN_BOARD_J33I it is the Apple TV 3's: one bus, 2 dies, disk0 8 GB
+ * (ppn.h).  The cache header records the die count, so a cache made on the
+ * other board is not taken for this one.
  */
 #include <arpa/inet.h>
 #include <endian.h>
@@ -42,9 +47,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "hfsvh.h"
 #include "ppn.h"
 
-#define NLBA            (16000000000ull / 4096)         /* disk0, in 4 KB */
+#define NLBA            (PPN_DISK0_BYTES / 4096)        /* disk0, in 4 KB */
 #define NONE            0xffffffffu
 #define META_LEN        (3 * PPN_CHUNK + PPN_META_OFF + 16)     /* through chunk 3's metadata */
 #define FIRST_BLOCK     1       /* block 0: boot pages on CAU0, retired on CAU1 */
@@ -403,6 +409,12 @@ static int read_part(struct part *p, uint64_t off, uint8_t *out, uint32_t len)
     return 0;
 }
 
+static int hfs_rd(void *ctx, uint64_t off, uint8_t *buf, uint32_t len)
+{
+    struct part *p = ctx;
+    return off + len > p->size ? -1 : read_part(p, off, buf, len);
+}
+
 /* ---- NBD ----------------------------------------------------------------- */
 
 static volatile sig_atomic_t stop;
@@ -575,7 +587,7 @@ static int serve(char **names, int n)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: iosnand scan | parts | read LBA [N] | serve [PARTITION...]\n");
+        fprintf(stderr, "usage: iosnand scan | parts | read LBA [N] | hfs [PARTITION] | serve [PARTITION...]\n");
         return 1;
     }
     if (getenv("IOSNAND_CACHE"))
@@ -590,7 +602,8 @@ int main(int argc, char **argv)
         if (!ppn_claim(bus))
             return 1;
     if (cache_load())
-        fprintf(stderr, "iosnand: no page cache yet: reading every page once, ~15 minutes\n");
+        fprintf(stderr, "iosnand: no page cache yet: reading every page once, ~%d minutes\n",
+                PPN_DIES * 3 + 3);
     int changed = scan(1);
     if (changed < 0)
         return 1;
@@ -614,6 +627,16 @@ int main(int argc, char **argv)
             if (read_lba(lba + i, b) || write_full(1, b, 4096))
                 return 1;
         return 0;
+    }
+    if (!strcmp(argv[1], "hfs")) {
+        const char *name = argc > 2 ? argv[2] : "System";
+        struct part *p = part_by_name(name);
+        if (!p) {
+            fprintf(stderr, "iosnand: no LwVM partition %s\n", name);
+            return 1;
+        }
+        printf("%s: %llu MB, %u chunks of 16 MB\n", p->name, (unsigned long long)(p->size >> 20), p->nchunks);
+        return hfs_describe(hfs_rd, p, stdout) ? 1 : 0;
     }
     if (!strcmp(argv[1], "serve"))
         return serve(argv + 2, argc - 2);

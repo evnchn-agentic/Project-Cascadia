@@ -21,6 +21,13 @@
  * chip's DQS, and with no chip the FMC waits forever.  And one process per
  * bus: two interleaved command sequences on one FMC wedge it and confuse the
  * PPN, so ppn_claim() takes /tmp/nandctl-busN.lock.
+ *
+ * Built with -DPPN_BOARD_J33I (the Apple TV 3, ppn.h) this is stricter still,
+ * because that box boots off this NAND every time: the allowlist loses the
+ * NAND reset (FF drops the PPN to SDR, and only a reboot brings DDR back), and
+ * set-feature, the bare E7 and every host -> NAND transfer (FMI_CONTROL 5,
+ * a write to FMI_DATA) are not compiled in at all.  What is left only ever
+ * moves data NAND -> host.  And ppn_open() refuses to run on the other board.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +51,9 @@ volatile uint32_t *ppn_pmgr;
 
 /* first byte, and the second one it may be paired with (0 = none) */
 static const uint8_t READ_ONLY_OPS[][2] = {
+#if !PPN_READ_ONLY_STRICT
     { 0xff, 0 },        /* reset */
+#endif
     { 0x90, 0 },        /* read ID */
     { 0x70, 0 },        /* read status */
     { 0xee, 0xe7 },     /* PPN get feature */
@@ -55,7 +64,54 @@ static const uint8_t READ_ONLY_OPS[][2] = {
     { 0x0a, 0x37 },     /* PPN page read */
 };
 
-#define CE_PRESENT      0x01    /* per bus, from the ADT's ce-bitmap 0x101 */
+/* Opcodes that program, erase or configure, raw NAND and PPN (ONFI, Toggle
+ * and iBEC's H2fmi_ppn*.c): never sent, whatever the allowlist says.  A second
+ * line of defence -- ppn_open() checks the two tables do not overlap, and
+ * nand_cmd2() checks this one again on every command. */
+static const uint8_t NEVER_OPS[] = {
+    0x80, 0x81, 0x85, 0x10, 0x11, 0x15, /* program, cache/multi-plane program */
+    0x60, 0xd0, 0xd1,                   /* block erase */
+    0x8a, 0x17,                         /* PPN boot page program */
+    0x67,                               /* PPN erase */
+    0xef, 0xd5,                         /* set features (ONFI / LUN) */
+    0xfa, 0xfc,                         /* synchronous / LUN reset */
+};
+
+static int never_op(uint8_t op)
+{
+    for (size_t i = 0; i < sizeof(NEVER_OPS); i++)
+        if (NEVER_OPS[i] == op)
+            return 1;
+    return 0;
+}
+
+/* The board this binary is for has to be the board it runs on: a P105 build
+ * on an Apple TV would drive FMI1, where there is no chip.  The J33i build
+ * insists on "apple,j33iap"; the P105 build only refuses the Apple TV, so it
+ * behaves on the iPad exactly as before. */
+static void board_check(void)
+{
+    char buf[512];
+    int fd = open("/proc/device-tree/compatible", O_RDONLY);
+    ssize_t n = fd < 0 ? -1 : read(fd, buf, sizeof(buf) - 1);
+    if (fd >= 0)
+        close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "cannot read /proc/device-tree/compatible%s\n",
+                PPN_READ_ONLY_STRICT ? ": refusing (this build is for " PPN_BOARD ")" : "");
+        if (PPN_READ_ONLY_STRICT)
+            exit(1);
+        return;
+    }
+    for (ssize_t i = 0; i < n; i++)     /* a list of NUL-separated strings */
+        if (!buf[i])
+            buf[i] = ' ';
+    buf[n] = 0;
+    if (PPN_READ_ONLY_STRICT ? !strstr(buf, "apple," PPN_BOARD) : !!strstr(buf, "apple,j33iap")) {
+        fprintf(stderr, "this nand tool is built for %s, and this is \"%s\": refusing\n", PPN_BOARD, buf);
+        exit(1);
+    }
+}
 
 static void *map(int fd, uint32_t pa)
 {
@@ -69,6 +125,13 @@ static void *map(int fd, uint32_t pa)
 
 int ppn_open(void)
 {
+    for (size_t i = 0; i < sizeof(READ_ONLY_OPS) / sizeof(READ_ONLY_OPS[0]); i++)
+        if (never_op(READ_ONLY_OPS[i][0]) || (READ_ONLY_OPS[i][1] && never_op(READ_ONLY_OPS[i][1]))) {
+            fprintf(stderr, "internal error: opcode %02x %02x is on both lists\n",
+                    READ_ONLY_OPS[i][0], READ_ONLY_OPS[i][1]);
+            exit(2);
+        }
+    board_check();
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd < 0) {
         perror("/dev/mem");
@@ -110,6 +173,10 @@ static int wait_done(volatile uint32_t *b, uint32_t off, uint32_t mask, uint32_t
  * second one in bits 15:8. */
 static void nand_cmd2(int bus, uint8_t op, uint8_t op2)
 {
+    if (never_op(op) || (op2 && never_op(op2))) {
+        fprintf(stderr, "refusing NAND opcodes %02x %02x: program / erase / configure\n", op, op2);
+        exit(2);
+    }
     for (size_t i = 0; i < sizeof(READ_ONLY_OPS) / sizeof(READ_ONLY_OPS[0]); i++)
         if (READ_ONLY_OPS[i][0] == op && READ_ONLY_OPS[i][1] == op2) {
             W(fmc[bus], FMC_CMD, op | op2 << 8);
@@ -124,10 +191,31 @@ static void nand_cmd(int bus, uint8_t op)
     nand_cmd2(bus, op, 0);
 }
 
+int ppn_bus_ok(int bus)
+{
+    if (bus < 0 || bus >= PPN_BUSES) {
+        fprintf(stderr, "FMI%d: %s has %d NAND bus%s; refusing\n", bus, PPN_BOARD, PPN_BUSES,
+                PPN_BUSES == 1 ? "" : "es");
+        return 0;
+    }
+    return 1;
+}
+
 int ppn_ce_ok(int ce)
 {
-    if (ce < 0 || ce > 7 || !(CE_PRESENT & (1u << ce))) {
-        fprintf(stderr, "CE%d: no chip there (ce-bitmap 0x101); refusing\n", ce);
+    if (ce < 0 || ce > 7 || !(PPN_CE_BITMAP & (1u << ce))) {
+        fprintf(stderr, "CE%d: no chip there (ce-bitmap 0x%x); refusing\n", ce, PPN_CE_BITMAP);
+        return 0;
+    }
+    return 1;
+}
+
+int ppn_bus_ce_ok(int bus, int ce)
+{
+    if (!ppn_bus_ok(bus))
+        return 0;
+    if (ce < 0 || ce > 7 || !(PPN_CE_BITMAP & (1u << (bus * 8 + ce)))) {
+        fprintf(stderr, "FMI%d CE%d: no chip there (ce-bitmap 0x%x); refusing\n", bus, ce, PPN_CE_BITMAP);
         return 0;
     }
     return 1;
@@ -189,6 +277,7 @@ void ppn_recover(int bus)
     W(fmc[bus], FMC_ON, v[0]);
 }
 
+#if !PPN_READ_ONLY_STRICT
 int ppn_nand_reset(int bus, int ce)
 {
     int r;
@@ -199,6 +288,7 @@ int ppn_nand_reset(int bus, int ce)
     W(fmc[bus], FMC_CE_CTRL, 0);
     return r;
 }
+#endif
 
 int ppn_read_id(int bus, int ce, uint8_t addr, uint8_t id[8])
 {
@@ -326,6 +416,7 @@ static int ppn_data_out(int bus, uint8_t *buf, uint32_t len)
     return 0;
 }
 
+#if !PPN_READ_ONLY_STRICT
 /* E7 on its own closes a set-feature; only ppn_set_power_state sends it. */
 static int ppn_cmd_e7(int bus)
 {
@@ -333,6 +424,7 @@ static int ppn_cmd_e7(int bus)
     W(fmc[bus], FMC_RW_CTRL, 1);
     return wait_done(fmc[bus], FMC_STATUS, 1, 1);
 }
+#endif
 
 static void ppn_end(int bus)
 {
@@ -352,6 +444,7 @@ int ppn_get_feature(int bus, int ce, uint16_t feat, uint8_t *buf, uint32_t len, 
     return r;
 }
 
+#if !PPN_READ_ONLY_STRICT
 /* h2fmi_ppn_set_features, for the power-state feature only: EF FEAT (RW_CTRL
  * 9), the value as one PIO word (FMI_CONTROL 5 = host to NAND), E7, status. */
 int ppn_set_power_state(int bus, int ce, uint32_t ps, uint8_t *st)
@@ -389,6 +482,7 @@ out:
     device_reset(bus, on, if_ctrl);
     return r;
 }
+#endif
 
 int ppn_params(int bus, int ce, uint8_t *buf, uint8_t *st)
 {

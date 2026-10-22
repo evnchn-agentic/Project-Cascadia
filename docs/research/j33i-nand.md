@@ -24,7 +24,7 @@ NBD), optionally with iOS's NAND as a read-only extra.
 
 | item | value | evidence |
 |---|---|---|
-| Interface | Apple FMI (`flash_controller0@1200000`, `fmi,s5l8940x` / `s5l8920x`), one bus | READ: DTS node has six 4 KB reg windows (one FMI + FMC + ECC set), iPad has two sets |
+| Interface | Apple FMI (`flash_controller0@1200000`, `fmi,s5l8940x` / `s5l8920x`), one bus populated | READ: the node has six 4 KB windows, two FMI + FMC + ECC sets exactly like the iPad (live `IODeviceMemory` 0x31200000/0x31240000/0x31280000 and 0x31300000/0x31340000/0x31380000), but only FMI0 CE0 has a chip (`#ce 1`, `ce-bitmap 1`, `#databus 1`). Corrected 2026-10-22: an earlier version of this row said one set |
 | Media type | PPN ("physical page NAND"): the package has its own controller, host sends a command protocol over Toggle-DDR | READ: `ppn-device = Yes`, `ppn-spec-version 05050100` (v1.5.5), `device-readid` bytes decode to "PPN", iBEC/iBoot print "PPN Device Detected" |
 | Vendor / part | Hynix, marketing name `20nm64Gb`, firmware `040472P_HYNIX_B_`, manufacturer id `AD 82 52 23 21 01` | READ: `controllers` property in ioreg-devicetree.txt |
 | Geometry | 1 CE, 2 CAUs, 1064 blocks per CAU (2128 per CE), 256 pages per MLC block (128 SLC), page 16384 + 64 bytes, 4 KB logical pages with 16 bytes metadata each | READ: same property and `#ce-blocks 2128`, `#block-pages 256`, `logical-page-size 4096` |
@@ -45,8 +45,10 @@ in the code but this unit uses PPN (READ).
 
 Differences from the iPad mini 1 (P105) that matter for code reuse:
 
-- 1 bus (FMI0 at 0x31200000 per the DTS `reg` 0x1200000 + the 0x30000000 ADT
-  base; confirm the base, GUESS) instead of 2. So 2 dies (CAUs) instead of 4.
+- 1 populated bus instead of 2, so 2 dies (CAUs) instead of 4. FMI0 is at
+  0x31200000 (READ, confirmed 2026-10-22: live `IODeviceMemory`, and iBoot's
+  own `h2fmi_init_minimal`; see "Evidence" below). FMI1 exists and iBoot
+  clocks it, but nothing is behind it.
 - 8 GB class (Data 6.5 GB) instead of 16 GB.
 - The iPad's stripe/sequence arithmetic assumed 4 dies (`+16 per page`); with
   2 dies the per-page sequence step is probably +8 (GUESS; the LBA plus
@@ -160,10 +162,213 @@ before a first NAND read).
 Open items to check before any read of this NAND (none were verifiable
 offline):
 
-- Confirm the FMI base address (ADT `reg` gives 0x1200000 relative to the
-  SoC base; the iPad's 0x31200000 suggests the same, GUESS).
+- ~~Confirm the FMI base address~~ Done 2026-10-22: 0x31200000, READ from the
+  live IORegistry and from iBoot (see "Evidence").
 - Confirm how much free space the System partition has, if option (5) is wanted.
 - Confirm whether the micro-USB port can ever be host-mode on this board; no
   evidence for it in the files read.
 - Confirm RAM size (DTS says 512 MiB as a placeholder; the real value is
   patched at boot, GUESS 512 MB).
+
+## 5. The read-only port (2026-10-22, compile-only, not yet run)
+
+Offline and compile-only: nothing below has touched the box. `BOARD=j33iap
+./cascadia build` is green with no new warnings (the driver recompiled clean;
+the NAND tools build clean with `-Wall -Wextra` for both boards; `dtc` warns
+about nothing, before or after). The kernel node is `status = "disabled"`, so
+the image boots exactly as before.
+
+### Evidence: FMI base, gates, geometry
+
+| item | J33i value | evidence |
+|---|---|---|
+| FMI0 / FMC0 / ECC0 | 0x31200000 / 0x31240000 / 0x31280000 | READ: live ioreg `IODeviceMemory` 824180736, 824442880, 824705024. READ: iBoot.fsboot (base 0x9FF00000) `h2fmi_init_minimal` = 0x9ff037fc: `0x9ff0383c ldr r0,[0x9ff03894]` (= 0x31300000), `cmp r5,0; itt eq; movs r0,0; movt r0,0x3120` at 0x9ff0383e-0x9ff03844, stored at `[fmi+4]`; so regs = bus ? 0x31300000 : 0x31200000. `0x9ff04ffc` (bus index) compares `[fmi+4]` against 0x31200000 (literal 0x9ff0500c) |
+| FMI1 | 0x31300000, **clocked, empty** | both callers of `h2fmi_init_minimal` (0x9ff02eee, 0x9ff02efa) init both buses, and it turns the bus's gates on (`bl 0x9ff22580` with on = 1 at 0x9ff03858). Nothing is behind it: `ce-bitmap 1`, `#ce 1`. So "gates on" does not mean "safe to read" there |
+| interrupts | 33 (FMI0), 34 (FMI1) | READ: ioreg `interrupts <21 22>`, ADT `<33 34>` |
+| clock gates | FMI0 0x3f1010c4, FMI0-BCH 0x3f1010c8, FMI1 0x3f1010cc, FMI1-BCH 0x3f1010d0 | READ: ADT `clock-gates <59 61 60 62>`; device-clocks entries 59-62 (FMI0, FMI0-BCH, FMI1, FMI1-BCH) have power indices 49-52, i.e. 0x3f101000 + 4 x index; iBoot `WMR_CLOCK_GATE` 0x9ff22580 gates ids 0x2f/0x30 (bus 0) and 0x31/0x32 (bus 1) through `clock_gate` 0x9ff20408 = `0x3f101008 + 4 * id` (low nibble = request, bits 7:4 = state). Same registers as P105 |
+| gates turned off before boot? | no evidence of it | the only caller of the WMR clock helper passes on = 1. Of the 29 direct `clock_gate` calls, every one that passes off (r1 = 0) has an immediate id (0x19, 0x1e, 0x1f, 0x24, 0x43), none of them 0x2f-0x32; the three that take the id from a table (0x9ff0b8e0, 0x9ff146c2, 0x9ff16240) all pass on = 1. Not proof: a direct PMGR store elsewhere would not show up in this search. The tools read the gates before any FMI access anyway |
+| block reset | PMGR bit 31 | `h2fmi_device_reset` = 0x9ff04fc0: `WMR_CLOCK_RESET_DEVICE(bus)` (0x9ff225c8, ids 0x2f / 0x31) -> `clock_reset_device` 0x9ff1fdac, which pulses bit 31 of PMGR words (seen for id 6; the path for 0x2f was not traced), then FMI_CONTROL = 6. Same as what `nandctl recover` does on P105 |
+| PPN geometry | 2 CAUs, 1064 blocks/CAU, 256 pages (128 SLC), 16448-byte pages, cau/block/page bits 4/11/8 | READ: ioreg `controllers` and `caus-ce 2`, `blocks-cau 0x428`, `#block-pages 256`, `#ce-blocks 2128`. Same as one P105 package, so `PPN_ROW` = page \| block << 8 \| cau << 19 carries over |
+| read ID | `50 50 4E 01 05 05` ("PPN" v1.5.5) | READ: `device-readid` 5519054884944 = 0x05_05_01_4E_50_50 |
+| firmware / ids | `040472P_HYNIX_B_`, manufacturer `AD 82 52 23 21 01` | READ: ioreg (P105's last byte is 02: its two packages) |
+| disk0 | 8 000 000 000 bytes = 1 953 125 LBAs of 4 KB | READ: ioreg-service `Size` |
+| timing, Toggle/DDR | inherited from iBoot | iBoot derives `FMC_IF_CTRL`, `FMC_TOGGLE_CTRL_1/2`, `FMC_DQS_TIMING_CTRL` from the device parameters (strings "Using DDR mode", 0x9ff35c5d...). The tools never write the Toggle/DQS registers (+0x70..0x78) outside `recover`. They do touch `FMC_IF_CTRL`: the status poll clears its bit 20, as iBEC does. Page reads and read ID put `FMC_ON`/`FMC_IF_CTRL` back afterwards; `getfeat`/`params` do not (P105 behaviour, unchanged). Whether iBoot's values suit S5L8947X's FMI clock is iBoot's choice, and iBoot reads this NAND with them at every boot |
+
+### What changed (all guarded; P105 builds as before)
+
+- `tools/nand/ppn.h`: `-DPPN_BOARD_J33I` selects `PPN_BUSES 1`,
+  `PPN_CE_BITMAP 0x001`, `PPN_DISK0_BYTES 8e9`, `PPN_READ_ONLY_STRICT 1`.
+  Without it: P105's values, unchanged.
+- `tools/nand/ppn.c`: bus and CE checks against the bitmap; a second
+  table of opcodes that are never sent (program 80/81/85/10/11/15, erase
+  60/D0/D1, PPN boot-page program 8A/17, PPN erase 67, set-features EF/D5,
+  sync/LUN reset FA/FC) checked against the allowlist at start-up and on every
+  command; a board check against `/proc/device-tree/compatible` (the J33i
+  build needs `apple,j33iap`; the P105 build refuses only `apple,j33iap`). In
+  the strict build NAND reset (FF), set-feature, the bare E7 and the only
+  host -> NAND transfer (`FMI_CONTROL 5`, a write to `FMI_DATA`) are not
+  compiled in.
+- `tools/nand/nandctl.c`: buses checked, not masked with `& 1` (so on P105 a
+  bus number other than 0 or 1 is now refused instead of folded; 0 and 1 behave
+  as before); `regs` and
+  `ppninfo` loop over `PPN_BUSES`; `reset`, `sdr`, `ddr` not compiled in the
+  strict build; new `ptab BUS CE [ROW]` decodes the `ndrG` flash partition table.
+- `tools/nand/iosnand.c`: disk0 size from `ppn.h`; new `hfs [PART]` prints the
+  volume header and the volume name, via `tools/nand/hfsvh.h` (read-only, tested on the
+  host against an HFSX image and an HFS+ image made with `hdiutil`: signature,
+  block size, total blocks and the volume names came out right; a zeroed image is
+  refused).
+- `cascadia`: passes `-DPPN_BOARD_J33I` to both tools when `BOARD=j33iap`.
+  Before this, the J33i image shipped the P105 build, whose `ppninfo` would
+  have driven FMI1.
+- `mtd-apple-h2fmi.c`: per-compatible variant. `apple,s5l8940x-fmi` = P105,
+  2 buses, as before. `apple,s5l8947x-fmi` = J33i, 1 bus, and probe first
+  reads the PMGR gate words (4th window, mapped not requested) and refuses
+  unless both read on, then refuses unless `FMC_ON` = 5 (DDR).
+- `dts/j33iap.dts`: `flash-controller@1200000`, FMI0/FMC0/ECC0 plus the
+  gate words, interrupt 33, `status = "disabled"`. Its own compatible only,
+  so the two-bus match cannot bind.
+
+### How the code guarantees no write or erase
+
+1. One door. In `ppn.c` every command byte reaches `FMC_CMD` through
+   `nand_cmd2()`. In the J33i build the preprocessed source has exactly
+   one store to `FMC_CMD` (checked with `gcc -E`, 2026-10-22), and it is
+   inside `nand_cmd2()`. P105's build keeps its two extra stores (E7 and EF,
+   for the power state); the J33i build compiles both out.
+2. Two tables. The allowlist (J33i: 90, 70, EE/E7, 92/97, 77/7D, 77, 7A,
+   0A/37) is checked against the never-list at start-up. A mutant with
+   `{ 0x80, 0x10 }` added to the allowlist exits with "opcode 80 10 is on
+   both lists" before it opens `/dev/mem` (run on the host, 2026-10-22).
+3. Nothing flows host -> NAND. The only `FMI_CONTROL = 5` and the only
+   `FMI_DATA` store are in `ppn_set_power_state`, which the strict build does
+   not compile (`nm`: no `ppn_set_power_state`, `ppn_nand_reset`,
+   `ppn_cmd_e7` in the J33i `nandctl`).
+4. NBD is read-only: `NBD_FLAG_READ_ONLY`, and `NBD_CMD_WRITE` gets EPERM.
+   `ios mount` mounts `-o ro`.
+5. The kernel driver has no `_write`, `_erase` or `MTD_WRITEABLE`, and
+   `MTD_BLOCK` is off. Its allowlist still lists FF, which no code path in the
+   driver sends.
+
+What is not ruled out by construction: a *read* sequence that confuses the
+PPN or the FMC (P105 saw that with two processes on one bus), which costs a
+reboot, not data. The per-bus lock is still there.
+
+### First on-box test
+
+Preconditions: boot the fsboot chain (iBoot reads `/linux.kc` off System and
+jumps; iOS, and so the `AppleIOPFMI` firmware, never runs). Not a kloader
+boot out of a running iOS. One shell, nothing else touching the NAND.
+
+Each step is read-only. Stop at the first surprise.
+
+```
+# 0. right binaries, right board
+nandctl 2>&1 | tail -1        # "(built for j33iap, 1 bus, read-only)"
+cat /proc/device-tree/compatible | tr '\0' ' '    # apple,j33iap ...
+
+# 1. clocks and bus mode: registers only, no NAND command
+peek r 0x3f1010c4 2                    # both words: low byte 0xff (requested on, is on)
+nandctl regs                           # FMI0 only; FMC +000 (FMC_ON) = 00000005,
+                                       # +070..078 = Toggle timing (P105: 00c40000 03020100 01011d0b)
+
+# 2. identify the package
+nandctl readid 0 0                     # DDR repeats each byte: 50 50 50 50 4e 4e 01 01 "PPPPNN.."
+                                       # (the ID is 50 50 4E 01 05 05, "PPN" v1.5.5)
+nandctl ppninfo                        # FMI0 CE0 firmware ... "040472P_HYNIX_B_"
+nandctl params 0 0                     # "PPN Device Info"; 0x10: CAUs 2, 0x18: blocks 0x428,
+                                       # pages 0x100, page size 0x4040
+
+# 3. one page, twice, must be identical
+nandctl page 0 0 0x000100 /tmp/p1      # CAU0 block 1 page 0: status 0x40 or 0x49
+nandctl page 0 0 0x000100 /tmp/p2 && cmp /tmp/p1 /tmp/p2
+
+# 4. the flash partition table
+nandctl ptab 0 0                       # header "ndrG"; entries boot, nvrm, firm, fsys ...
+nandctl ptab 0 0 1                     # page 1: the same table
+
+# 5. FTL map, LwVM, the System volume header (first run reads every page's
+#    metadata once: ~6 min for 2 dies, by P105's 714 s for 4)
+IOSNAND_CACHE=/tmp/pages.v1 iosnand parts      # System ~1334 MB, Data ~6225 MB
+IOSNAND_CACHE=/tmp/pages.v1 iosnand hfs System
+```
+
+What proves success:
+
+- step 2: read ID `50 50 4E 01 05 05` (printed doubled in DDR, as above) and firmware `040472P_HYNIX_B_`,
+  equal to the IORegistry. This proves the base, the gates and the bus mode in
+  one go.
+- step 3: status 0x40 (or 0x49 for an erased page), and `cmp` silent.
+- step 4: `ndrG`, an `fsys` entry covering nearly all 2128 blocks (P105: start
+  1, 2127 blocks).
+- step 5: `iosnand parts` shows System about 1 399 549 952 bytes and Data about
+  6 527 684 608 (ioreg sizes); `iosnand hfs System` prints signature `"HX"`
+  (HFSX, version 5) or `"H+"` (version 4) with block size 4096 and
+  block size x total blocks = 1 399 549 952, plus a volume name.
+  P105's System was HFSX, named `Donner12H321.P105OS`. On a 12H847 Apple TV
+  expect something like that with the J33i build name, GUESS. Then
+  `ios mount` and `cat /mnt/ios/System/Library/CoreServices/SystemVersion.plist`
+  should say 8.4.4 / 12H847 (the version the live ioreg came from).
+
+RAM: the page table is about 13 MB, the LBA map 7.8 MB, plus 15.6 MB while
+it is built. About 37 MB at peak, and the cache file is another 13 MB wherever
+it lands in RAM (`/tmp` and `/var/lib/iosnand` are both RAM on the RAM root):
+about 50 MB against the RAM root's ~88 MB free. On an NFS root, point
+`IOSNAND_CACHE` there instead. It saves the 13 MB and survives a reboot (later
+starts take about a second instead of a full scan).
+
+The kernel driver is a later, separate step. Enable the node only after all
+five steps passed: flip `status`, rebuild, boot. Look for `bus 0:
+FMC_ON=0x00000005` and `2 dies, 1064 blocks of 4096 KiB each, read-only`.
+Then read the same page through MTD (`dd if=/dev/mtd0 bs=16384 count=1
+skip=256`, block 1 page 0) and check it against `/tmp/p1` with the 16 metadata
+bytes at 0x400 of each 4112-byte chunk cut out.
+
+### Risks, ranked
+
+1. **FMI state on the fsboot path (medium likelihood, low cost).** The port
+   assumes iBoot leaves FMI0 clocked, in DDR, with its timing, as iBEC does on
+   P105. iBoot does read System over this bus at every fsboot boot, through
+   the same `h2fmi` code, and no `clock_gate` call in iBoot switches FMI
+   off (Evidence table). But a direct PMGR store before the jump would not
+   show up in that search. Cost if wrong: the tools refuse (gates) or a command times out.
+   No data at stake. Step 1 checks it before any NAND command.
+2. **The IOP (low on fsboot, high on a kloader-from-iOS boot).** `AppleIOPFMI`
+   drives FMI from the IOP while iOS runs. On fsboot iOS never starts, so the
+   IOP is never loaded (GUESS, consistent with iBoot driving FMI itself).
+   After a kloader boot out of a running iOS the IOP may still be running.
+   Two masters on one FMC wedge it (P105) and could leave a half-done iOS
+   write. **Do not run any of this after a kloader-from-iOS boot.** Nothing
+   in the code can tell the two boot paths apart; this rule is on the operator.
+3. **FMI1 (low now, was real).** Reading data on FMI1 wedges it (no chip,
+   no DQS). The J33i build never maps it. Before this change the image
+   shipped the P105 tools, and `nandctl ppninfo` would have driven it. Wedging
+   is a host-side hang, not NAND damage; recovery is a reboot.
+4. **A confused PPN (low).** Concurrent sequences, or one aborted halfway,
+   can leave the PPN answering 0x11/0x51 (P105). The lock prevents the
+   first. Recovery is a reboot through iBoot. The strict build cannot send
+   FF, so it cannot drop the PPN to SDR (on P105 that only came back after a
+   reboot).
+5. **`nandctl recover` (low, avoid).** It pulses the FMI block reset (PMGR bit
+   31 at 0x3f1010c4). That is iBoot's own mechanism (`h2fmi_device_reset`,
+   Evidence table) and was verified on P105, but has not been run on J33i. It
+   sends no NAND command. Use it only if a bus is already wedged, and prefer a reboot.
+6. **Geometry or metadata assumptions (low, safe failure).** Stripe or sequence
+   arithmetic could differ with 2 dies. The map only uses "highest sequence
+   wins per LBA", and every read checks the LBA in the page's metadata, which
+   catches data that moved since the scan. It does not catch everything:
+   an LBA the scan missed reads back as zeros, and a wrong sequence order
+   would serve an older copy of the right LBA. Both are wrong data, not a
+   write. The checks against that are external: `fsck_hfs -n` on a dumped
+   image, `codesign -v` on binaries, as on P105.
+7. **Boot page layout (low, cosmetic).** `ptab` reads the boot page raw and
+   drops the BCH bytes. In DDR the FMI may shift each sector (P105). If the
+   header does not read `ndrG`, try ROW 1 and compare with `bootpage` output.
+   That is a read, so nothing can be lost.
+
+Confidence: high that the base, gates and page geometry are right (two
+independent READ sources agree, and P105's verified sequences are
+unchanged). High that no write or erase path exists in the J33i build
+(structural, checked in the preprocessed source and the binary's symbols, plus
+a mutation test). Medium that the first `readid` just works, because of the
+untested assumption that iBoot leaves FMI0 clocked and in DDR on fsboot (risk 1).

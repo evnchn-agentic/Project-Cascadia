@@ -14,6 +14,9 @@
  *   nandctl bootpage BUS CE ROW [F] boot-page format (LLB, flash partition
  *                                   table): 3 x (512 data + 53 BCH bytes), the
  *                                   BCH bytes dropped, NOT corrected
+ *   nandctl ptab BUS CE [ROW]       the flash partition table ("ndrG", boot
+ *                                   page ROW, default 0 = block 0 page 0),
+ *                                   decoded: geometry and partitions
  *   nandctl recover BUS             un-wedge a bus: PMGR block reset (as iBEC's
  *                                   h2fmi_device_reset), FMC config put back
  *   nandctl sdr BUS                 FMC to SDR (FMC_ON 1, slow timing): what a
@@ -25,11 +28,15 @@
  *                                   into F.st
  *
  * ROW = page | block << 8 | cau << 19 (| slc << 23), 3 address bytes.  CE is
- * the chip select on that bus; on p105 only CE0 has a chip.  Every command
+ * the chip select on that bus; on p105 only CE0 has a chip.  Built with
+ * -DPPN_BOARD_J33I (the Apple TV 3: one bus, FMI0 CE0 only) BUS must be 0, and
+ * reset / sdr / ddr do not exist: nothing that changes the PPN's state is
+ * compiled in (ppn.c).  Every command
  * that drives a bus takes its lock first and gives up if something else
  * (another nandctl, iosnand) holds it.  Build:
  *   arm-linux-gnueabihf-gcc -static -Os -D_FILE_OFFSET_BITS=64 -o nandctl \
  *       tools/nand/nandctl.c tools/nand/ppn.c
+ * (add -DPPN_BOARD_J33I for the Apple TV; ./cascadia does it for BOARD=j33iap)
  */
 #include <fcntl.h>
 #include <stdint.h>
@@ -79,6 +86,59 @@ static void dump(const char *name, volatile uint32_t *b, uint32_t pa, uint32_t n
     }
 }
 
+/* A boot page (LLB, the flash partition table): 3 x (512 data + 53 BCH), read
+ * raw, the BCH bytes dropped.  buf gets 0x600 bytes. */
+static int read_bootpage(int bus, int ce, uint32_t row, uint8_t buf[0x600], uint8_t *st)
+{
+    uint8_t raw[3 * 565 + 3] __attribute__((aligned(4))) = { 0 };
+    int r = ppn_read_page(bus, ce, row, raw, sizeof(raw) & ~3u, st);
+    for (int i = 0; i < 3; i++)
+        memcpy(buf + i * 512, raw + i * 565, 512);
+    return r;
+}
+
+static uint32_t le32(const uint8_t *p)
+{
+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void fourcc(const uint8_t *p, char out[5], int reverse)
+{
+    for (int i = 0; i < 4; i++) {
+        uint8_t c = p[reverse ? 3 - i : i];
+        out[i] = c >= 0x20 && c < 0x7f ? c : '.';
+    }
+    out[4] = 0;
+}
+
+/* The flash partition table (docs/research/p105-nand.md): "ndrG" header, the
+ * device geometry at 0x200, 32 entries of 16 bytes at 0x400 (tag, start block,
+ * block count, flags).  Tags are printed both ways round, since which byte
+ * order the table keeps them in is not pinned down. */
+static int print_ptab(const uint8_t *b)
+{
+    char t[5], tr[5];
+    fourcc(b, t, 0);
+    fourcc(b, tr, 1);
+    printf("header \"%s\" (\"%s\")%s\n", t, tr,
+           !memcmp(b, "ndrG", 4) || !memcmp(b, "Grdn", 4) ? "" : "  -- NOT ndrG: no table here");
+    if (memcmp(b, "ndrG", 4) && memcmp(b, "Grdn", 4))
+        return 1;
+    printf("geometry at 0x200:");
+    for (int i = 0; i < 8; i++)
+        printf(" 0x%x", le32(b + 0x200 + 4 * i));
+    printf("\n%-6s %-6s %8s %8s %8s\n", "tag", "(rev)", "start", "blocks", "flags");
+    for (int i = 0; i < 32; i++) {
+        const uint8_t *e = b + 0x400 + 16 * i;
+        if (!le32(e) && !le32(e + 4) && !le32(e + 8) && !le32(e + 12))
+            continue;
+        fourcc(e, t, 0);
+        fourcc(e, tr, 1);
+        printf("%-6s %-6s %8u %8u   0x%03x\n", t, tr, le32(e + 4), le32(e + 8), le32(e + 12));
+    }
+    return 0;
+}
+
 static void print_id(int bus, int ce, uint8_t addr, const uint8_t id[8])
 {
     printf("FMI%d CE%d id@%02x:", bus, ce, addr);
@@ -95,7 +155,7 @@ int main(int argc, char **argv)
     ppn_open();
 
     if (argc >= 2 && !strcmp(argv[1], "regs")) {
-        for (int b = 0; b < 2; b++) {
+        for (int b = 0; b < PPN_BUSES; b++) {
             printf("FMI%d gates: 0x%08x 0x%08x\n", b, R(ppn_pmgr, 0xc4 + b * 8), R(ppn_pmgr, 0xc8 + b * 8));
             if (!ppn_gates_on(b))
                 continue;
@@ -106,8 +166,8 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc >= 4 && !strcmp(argv[1], "readid")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         uint8_t addr = argc > 4 ? strtoul(argv[4], NULL, 0) : 0, id[8];
         if (!ppn_claim(bus))
@@ -116,9 +176,10 @@ int main(int argc, char **argv)
         print_id(bus, ce, addr, id);
         return r ? 1 : 0;
     }
+#if !PPN_READ_ONLY_STRICT
     if (argc >= 4 && !strcmp(argv[1], "reset")) {
         int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         if (!ppn_claim(bus))
             return 1;
@@ -126,9 +187,10 @@ int main(int argc, char **argv)
         printf("FMI%d CE%d reset: %s\n", bus, ce, r ? "timeout" : "ok");
         return r ? 1 : 0;
     }
+#endif
     if (argc >= 6 && !strcmp(argv[1], "getfeat")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         uint16_t feat = strtoul(argv[4], NULL, 0);
         uint32_t len = strtoul(argv[5], NULL, 0);
@@ -141,8 +203,8 @@ int main(int argc, char **argv)
         return r ? 1 : 0;
     }
     if (argc >= 4 && !strcmp(argv[1], "params")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         uint8_t buf[0x200] = { 0 }, st = 0;
         if (!ppn_claim(bus))
@@ -153,7 +215,7 @@ int main(int argc, char **argv)
         return r ? 1 : 0;
     }
     if (argc >= 2 && !strcmp(argv[1], "ppninfo")) {
-        for (int b = 0; b < 2; b++) {
+        for (int b = 0; b < PPN_BUSES; b++) {
             uint8_t buf[16] = { 0 }, st = 0;
             if (!ppn_claim(b))
                 continue;
@@ -163,17 +225,29 @@ int main(int argc, char **argv)
         }
         return 0;
     }
-    if (argc >= 5 && !strcmp(argv[1], "bootpage")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+    if (argc >= 4 && !strcmp(argv[1], "ptab")) {
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
-        uint32_t row = strtoul(argv[4], NULL, 0);
-        uint8_t raw[3 * 565 + 3] __attribute__((aligned(4))) = { 0 }, buf[0x600], st = 0;
+        uint32_t row = argc > 4 ? strtoul(argv[4], NULL, 0) : 0;
+        uint8_t buf[0x600], st = 0;
         if (!ppn_claim(bus))
             return 1;
-        int r = ppn_read_page(bus, ce, row, raw, sizeof(raw) & ~3u, &st);
-        for (int i = 0; i < 3; i++)
-            memcpy(buf + i * 512, raw + i * 565, 512);
+        int r = read_bootpage(bus, ce, row, buf, &st);
+        printf("FMI%d CE%d boot page 0x%06x: status 0x%02x%s\n", bus, ce, row, st, r ? " (failed)" : "");
+        if (r)
+            return 1;
+        return print_ptab(buf);
+    }
+    if (argc >= 5 && !strcmp(argv[1], "bootpage")) {
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
+            return 1;
+        uint32_t row = strtoul(argv[4], NULL, 0);
+        uint8_t buf[0x600], st = 0;
+        if (!ppn_claim(bus))
+            return 1;
+        int r = read_bootpage(bus, ce, row, buf, &st);
         printf("FMI%d CE%d boot page 0x%06x: status 0x%02x%s\n", bus, ce, row, st, r ? " (failed)" : "");
         if (argc >= 6) {
             FILE *f = fopen(argv[5], "wb");
@@ -188,8 +262,8 @@ int main(int argc, char **argv)
         return r ? 1 : 0;
     }
     if (argc >= 3 && !strcmp(argv[1], "recover")) {
-        int bus = atoi(argv[2]) & 1;
-        if (!ppn_claim(bus))
+        int bus = atoi(argv[2]);
+        if (!ppn_bus_ce_ok(bus, 0) || !ppn_claim(bus))
             return 1;
         ppn_recover(bus);
         uint8_t buf[16] = { 0 }, st = 0;
@@ -198,6 +272,7 @@ int main(int argc, char **argv)
                r ? " (failed)" : "", (char *)buf);
         return r ? 1 : 0;
     }
+#if !PPN_READ_ONLY_STRICT
     if (argc >= 3 && !strcmp(argv[1], "sdr")) {
         int bus = atoi(argv[2]) & 1;
         if (!ppn_claim(bus))
@@ -220,9 +295,10 @@ int main(int argc, char **argv)
         W(ppn_fmc[bus], FMC_IF_CTRL, 0);
         return 0;
     }
+#endif
     if (argc >= 6 && !strcmp(argv[1], "page")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         uint32_t row = strtoul(argv[4], NULL, 0);
         uint32_t len = argc > 6 ? strtoul(argv[6], NULL, 0) : PAGE_RAW;
@@ -242,8 +318,8 @@ int main(int argc, char **argv)
         return r ? 1 : 0;
     }
     if (argc >= 8 && !strcmp(argv[1], "dump")) {
-        int bus = atoi(argv[2]) & 1, ce = atoi(argv[3]);
-        if (!ppn_ce_ok(ce))
+        int bus = atoi(argv[2]), ce = atoi(argv[3]);
+        if (!ppn_bus_ce_ok(bus, ce))
             return 1;
         uint32_t cau = strtoul(argv[4], NULL, 0), blk = strtoul(argv[5], NULL, 0);
         uint32_t n = strtoul(argv[6], NULL, 0);
@@ -287,9 +363,12 @@ int main(int argc, char **argv)
             close(out);
         return 0;
     }
-    fprintf(stderr, "usage: nandctl regs | readid BUS CE [ADDR] | reset BUS CE |\n"
+    fprintf(stderr, "usage: nandctl regs | readid BUS CE [ADDR] |%s\n"
                     "               getfeat BUS CE FEAT LEN | params BUS CE | ppninfo |\n"
-                    "               page BUS CE ROW FILE [LEN] | bootpage BUS CE ROW [FILE] |\n"
-                    "               dump BUS CE CAU BLOCK NBLOCKS FILE | recover BUS | sdr BUS | ddr BUS\n");
+                    "               page BUS CE ROW FILE [LEN] | bootpage BUS CE ROW [FILE] | ptab BUS CE [ROW] |\n"
+                    "               dump BUS CE CAU BLOCK NBLOCKS FILE | recover BUS%s\n"
+                    "  (built for %s, %d bus%s, read-only)\n",
+            PPN_READ_ONLY_STRICT ? "" : " reset BUS CE |", PPN_READ_ONLY_STRICT ? "" : " | sdr BUS | ddr BUS",
+            PPN_BOARD, PPN_BUSES, PPN_BUSES == 1 ? "" : "es");
     return 1;
 }

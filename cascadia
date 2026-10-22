@@ -383,9 +383,12 @@ cmd_build() {
     note "ok: /sbin/p105-keys (static ARM)"
     # The NAND, read-only: nandctl pokes the PPN chips, iosnand serves iOS's
     # partitions as block devices (`ios mount`).  docs/research/p105-nand.md.
-    in_docker "arm-linux-gnueabihf-gcc -static -Os -D_FILE_OFFSET_BITS=64 -o build/initramfs-root/sbin/nandctl tools/nand/nandctl.c tools/nand/ppn.c && arm-linux-gnueabihf-gcc -static -O2 -D_FILE_OFFSET_BITS=64 -o build/initramfs-root/sbin/iosnand tools/nand/iosnand.c tools/nand/ppn.c"
+    # The Apple TV build (one bus, 8 GB, no reset / set-feature compiled in) is
+    # a different binary: a P105 one there would drive FMI1, where nothing is.
+    NANDDEF=; [ "$BOARD" = j33iap ] && NANDDEF=-DPPN_BOARD_J33I
+    in_docker "arm-linux-gnueabihf-gcc -static -Os -D_FILE_OFFSET_BITS=64 $NANDDEF -o build/initramfs-root/sbin/nandctl tools/nand/nandctl.c tools/nand/ppn.c && arm-linux-gnueabihf-gcc -static -O2 -D_FILE_OFFSET_BITS=64 $NANDDEF -o build/initramfs-root/sbin/iosnand tools/nand/iosnand.c tools/nand/ppn.c"
     [ -s "$ROOT/build/initramfs-root/sbin/iosnand" ] || fail "iosnand did not build"
-    note "ok: /sbin/nandctl, /sbin/iosnand (static ARM)"
+    note "ok: /sbin/nandctl, /sbin/iosnand (static ARM${NANDDEF:+, J33i: one bus})"
     # Wi-Fi's tools and the on-screen keyboard ride in the image (a RAM boot
     # has no network to apk add them with).  A tree made by an older
     # ./cascadia rootfs lacks them; add them rather than make it start over.

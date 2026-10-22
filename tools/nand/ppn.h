@@ -12,7 +12,28 @@
 
 #include <stdint.h>
 
+/* Board: the default build is P105 (iPad mini 1).  -DPPN_BOARD_J33I builds for
+ * the Apple TV 3 (J33i, S5L8947X): ONE PPN on CE0 of FMI0, nothing on FMI1
+ * (live IORegistry: #ce 1, ce-bitmap 1, #databus 1, disk0 8 000 000 000
+ * bytes).  iBoot still clocks FMI1 there (h2fmi_init_minimal runs for both
+ * buses), so a "gates on" check would not stop a read of it -- and a data read
+ * with no chip behind it wedges the bus.  PPN_BUSES = 1 is what keeps it out:
+ * nothing maps FMI1.  Same FMI base, gates, page geometry and row layout as
+ * P105 (docs/research/j33i-nand.md, "Evidence").  The J33i build is also
+ * stricter: no NAND reset, no set-feature, nothing host -> NAND (ppn.c). */
+#ifdef PPN_BOARD_J33I
+#define PPN_BUSES               1
+#define PPN_CE_BITMAP           0x001u          /* bit bus * 8 + ce */
+#define PPN_DISK0_BYTES         8000000000ull
+#define PPN_BOARD               "j33iap"
+#define PPN_READ_ONLY_STRICT    1
+#else
 #define PPN_BUSES               2
+#define PPN_CE_BITMAP           0x101u
+#define PPN_DISK0_BYTES         16000000000ull
+#define PPN_BOARD               "p105ap"
+#define PPN_READ_ONLY_STRICT    0
+#endif
 #define PPN_CAUS                2
 #define PPN_DIES                (PPN_BUSES * PPN_CAUS)
 #define PPN_BLOCKS              1064
@@ -63,16 +84,22 @@ extern volatile uint32_t *ppn_fmi[PPN_BUSES], *ppn_fmc[PPN_BUSES], *ppn_ecc[PPN_
 extern volatile uint32_t *ppn_pmgr;
 
 int ppn_open(void);                     /* map everything; exits on failure */
-int ppn_ce_ok(int ce);                  /* a chip behind this CE (ce-bitmap 0x101) */
+int ppn_bus_ok(int bus);                /* a bus this board has: 0..PPN_BUSES-1 */
+int ppn_ce_ok(int ce);                  /* a chip behind this CE (ce-bitmap, bus 0) */
+int ppn_bus_ce_ok(int bus, int ce);     /* both, against PPN_CE_BITMAP */
 int ppn_gates_on(int bus);              /* clocked */
 int ppn_lock(int bus);                  /* flock /tmp/nandctl-busN.lock, held until exit */
 int ppn_claim(int bus);                 /* clocked and ours */
 
+#if !PPN_READ_ONLY_STRICT
 int ppn_nand_reset(int bus, int ce);
+#endif
 int ppn_read_id(int bus, int ce, uint8_t addr, uint8_t id[8]);
 int ppn_get_feature(int bus, int ce, uint16_t feat, uint8_t *buf, uint32_t len, uint8_t *st);
 int ppn_params(int bus, int ce, uint8_t *buf, uint8_t *st);
+#if !PPN_READ_ONLY_STRICT
 int ppn_set_power_state(int bus, int ce, uint32_t ps, uint8_t *st);
+#endif
 void ppn_recover(int bus);
 
 /* One page, the first len bytes of it (a multiple of 4).  Returns 0 when the
