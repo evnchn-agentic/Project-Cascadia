@@ -1,0 +1,9 @@
+Welcome to Alpine on Apple TV 3 (AppleTV3,2 / J33i / S5L8947X).
+
+  HDMI 1080p, HDMI audio, Ethernet, Wi-Fi, Bluetooth and the IR remote; @ROOT@
+
+  wifi            Wi-Fi: scan, connect, remember networks
+  bluetooth       Bluetooth: scan, pair keyboards, mice and the like
+  apk             packages, over Ethernet, the USB network or Wi-Fi
+  aplay -D hw:HDMI,0 FILE.wav   plays over HDMI (default goes there too)
+  reboot          restarts into iOS

@@ -51,6 +51,11 @@ case "$ROOTTYPE" in
     nfs*) where="the root is NFS\n  from the host's machine." ;;
     *)    where="the root sits in RAM." ;;
 esac
+# Apple TV 3: its own banner, and ALSA's default on the HDMI card instead of the iPad's speakers.
+if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null; then
+    [ -f /etc/motd.j33i ] && cat /etc/motd.j33i > /etc/motd
+    [ -f /etc/asound.conf ] && sed -i 's/iPadMini/HDMI/g' /etc/asound.conf
+fi
 if grep -q @ROOT@ /etc/motd 2>/dev/null; then
     awk -v w="$where" '{ sub(/@ROOT@/, w) } 1' /etc/motd > /run/motd \
         && cat /run/motd > /etc/motd
