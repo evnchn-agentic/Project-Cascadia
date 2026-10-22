@@ -212,7 +212,7 @@
 
 		/* Audio power states (decoded from the 44-byte device-clocks table): AUDIO
 		 * (id 46), I2S (id 47, one gate for every I2S port, child of AUDIO) and
-		 * CDMA (id 85).  s5l-hdmi holds all three while bound (one also feeds Ethernet). */
+		 * CDMA (id 85).  s5l-hdmi holds all three while bound; CDMA also feeds Ethernet (s5l_fe holds it too). */
 		audio_ps: audio-ps@f10109c {
 			compatible = "apple,s5l8940x-pmgr-clk-gate";
 			#clock-cells = <0>;
@@ -295,6 +295,8 @@
 			compatible = "apple,s5l8947x-fe";
 			reg = <0xb000000 0x10000>;
 			interrupts = <27>;
+			clocks = <&cdma_ps>;		/* off, eth0 dies (measured) */
+			clock-names = "cdma";
 			status = "okay";
 		};
 

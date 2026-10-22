@@ -7,6 +7,7 @@
  *
  * Lives under mach-apple for now only to avoid touching drivers/net glue.
  */
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
@@ -371,6 +372,7 @@ static const struct net_device_ops fe_ops = {
 static int fe_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct clk *clk;
 	void __iomem *gate;
 	struct net_device *ndev;
 	struct fe_priv *p;
@@ -384,6 +386,11 @@ static int fe_probe(struct platform_device *pdev)
 	udelay(10);
 	dev_info(dev, "clock gate %#x\n", readl(gate));
 	iounmap(gate);
+
+	/* The CDMA power gate also feeds this block: switching it off killed eth0 at once. */
+	clk = devm_clk_get_optional_enabled(dev, "cdma");
+	if (IS_ERR(clk))
+		return dev_err_probe(dev, PTR_ERR(clk), "no CDMA power state\n");
 
 	ndev = devm_alloc_etherdev(dev, sizeof(*p));
 	if (!ndev)
