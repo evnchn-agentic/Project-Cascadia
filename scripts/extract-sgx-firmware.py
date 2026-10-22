@@ -2,6 +2,7 @@
 """extract-sgx-firmware.py -- the GPU microkernel, out of the user's own IPSW.
 
     python3 scripts/extract-sgx-firmware.py <ipsw> <out.fw> [<kernelcache.out>]
+    python3 scripts/extract-sgx-firmware.py --kernelcache <kc.macho> <out.fw>
 
 The SGX543MP2 runs a microkernel that iOS ships inside its GPU kext,
 com.apple.driver.IMGSGX543, in the kernelcache.  It is Apple's and
@@ -20,6 +21,17 @@ layout of both.  The driver (drivers/gpu/drm/apple-sgx) uses offsets into
 these exact bytes, so both are checked against the hashes of the 12H321
 build and anything else is refused rather than half-loaded.
 
+--kernelcache takes an already decrypted and decompressed kernelcache
+instead of an IPSW (no keys, no pycryptodome): the Apple TV 3's, J33i
+12H847, which has its own keys and comes as work/kc.j33i.macho.  Its kext
+is the 12H321 one linked 0x51000 lower (0x80ba0000, not 0x80bf1000):
+__const is byte-identical, and __data differs only in three words of the
+kext's kmod_info at its end -- address, start and stop -- which the driver
+never reads (its last table ends at +0x15fe8, where kmod_info begins).
+Those three words, and the header's two addresses, are put back to their
+12H321 values, so the hashes below hold for both and the output is the
+same file whichever kernelcache it came from.
+
 With a third argument the whole decrypted kernelcache is written there too:
 tools/sgx/mkpack.py runs the GPU kext's render-target code from it in an
 emulator (docs/GPU.md).
@@ -32,8 +44,8 @@ Output: a 64-byte header, then the two sections.
     0x10  u32      __data size
     0x14  u32      __const offset in this file
     0x18  u32      __const size
-    0x1c  u32      __data address in the kernelcache
-    0x20  u32      __const address in the kernelcache
+    0x1c  u32      __data address in the 12H321 kernelcache
+    0x20  u32      __const address in the 12H321 kernelcache
     0x24  char[16] build ("12H321")
     0x34  pad to 0x40
 """
@@ -44,8 +56,6 @@ import os
 import struct
 import sys
 import zipfile
-
-from Crypto.Cipher import AES
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -60,6 +70,13 @@ DATA_SIZE = 0x16094
 DATA_SHA256 = "ee453025b21ac4633aebba7745532da96cb4909482f3d5fc2526423fd58561ba"
 CONST_SIZE = 0x730
 CONST_SHA256 = "b59b6d44138d90c08605d0cd01643986eca1dd35e6071694b01fc2d21166d751"
+# The kext's Mach-O header in the 12H321 kernelcache (docs/research/p105-gpu.md).
+KEXT_BASE = 0x80BF1000
+KEXT_NAME = b"com.apple.driver.IMGSGX543"
+# kmod_info, at the end of __data: name at +0x0c, address +0x94, start +0xa0,
+# stop +0xa4 (xnu's kmod_info_t).
+KMOD_OFF = 0x15FE8
+KMOD_PTRS = (0x94, 0xA0, 0xA4)
 
 MH_MAGIC = 0xFEEDFACE
 LC_SEGMENT = 1
@@ -112,6 +129,8 @@ def lzss(comp, outlen):
 
 
 def kernelcache(ipsw):
+    from Crypto.Cipher import AES  # only the IPSW path needs it
+
     try:
         with zipfile.ZipFile(ipsw) as z:
             img3 = z.read(KERNELCACHE)
@@ -152,11 +171,17 @@ def segments(buf, base):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
+    args = sys.argv[1:]
+    if args[:1] == ["--kernelcache"] and len(args) == 3:
+        with open(args[1], "rb") as fh:
+            kc = fh.read()
+        out, kc_out = args[2], None
+    elif len(args) in (2, 3) and not args[0].startswith("-"):
+        kc = kernelcache(args[0])
+        out, kc_out = args[1], args[2] if len(args) == 3 else None
+    else:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
-    ipsw, out = sys.argv[1:3]
-    kc = kernelcache(ipsw)
     top = segments(kc, 0) or fail("kernelcache is not a 32-bit Mach-O")
     pt = top.get("__PRELINK_TEXT") or fail("no __PRELINK_TEXT")
     pt_va, pt_off = pt[0], pt[1]
@@ -183,8 +208,27 @@ def main():
 
     daddr, dsize, _ = found["__DATA"][2]["__data"]
     caddr, csize, _ = found["__TEXT"][2]["__const"]
-    data = kc[va2off(daddr):va2off(daddr) + dsize]
+    data = bytearray(kc[va2off(daddr):va2off(daddr) + dsize])
     const = kc[va2off(caddr):va2off(caddr) + csize]
+
+    # A kernelcache that links the kext elsewhere (J33i 12H847: 0x80ba0000):
+    # only kmod_info's pointers carry the address; put them back to 12H321's.
+    base = found["__TEXT"][0]
+    delta = (KEXT_BASE - base) & 0xFFFFFFFF
+    if len(data) == DATA_SIZE and delta:
+        km = KMOD_OFF
+        name = bytes(data[km + 0x0C:km + 0x4C]).split(b"\0")[0]
+        addr = struct.unpack_from("<I", data, km + 0x94)[0]
+        if name != KEXT_NAME or addr != base:
+            fail(f"no kmod_info for {KEXT_NAME.decode()} at __data+0x{km:x}")
+        for o in KMOD_PTRS:
+            v = struct.unpack_from("<I", data, km + o)[0]
+            struct.pack_into("<I", data, km + o, (v + delta) & 0xFFFFFFFF)
+        print(f"  IMGSGX543 at 0x{base:08x}, 12H321's at 0x{KEXT_BASE:08x}: "
+              "kmod_info relocated")
+    data = bytes(data)
+    daddr = (daddr + delta) & 0xFFFFFFFF
+    caddr = (caddr + delta) & 0xFFFFFFFF
     for name, blob, size, sha in (("__data", data, DATA_SIZE, DATA_SHA256),
                                   ("__const", const, CONST_SIZE, CONST_SHA256)):
         if len(blob) != size or hashlib.sha256(blob).hexdigest() != sha:
@@ -199,10 +243,10 @@ def main():
         fh.write(hdr + data + const)
     print(f"  {out}: microkernel 0x{len(data):x} + templates 0x{len(const):x} "
           f"bytes from IMGSGX543 ({BUILD})")
-    if len(sys.argv) == 4:
-        with open(sys.argv[3], "wb") as fh:
+    if kc_out:
+        with open(kc_out, "wb") as fh:
             fh.write(kc)
-        print(f"  {sys.argv[3]}: the decrypted kernelcache, 0x{len(kc):x} bytes")
+        print(f"  {kc_out}: the decrypted kernelcache, 0x{len(kc):x} bytes")
     return 0
 
 

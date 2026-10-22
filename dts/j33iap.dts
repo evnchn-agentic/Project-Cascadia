@@ -237,6 +237,44 @@
 			clock-output-names = "cdma_ps";
 		};
 
+		/* The GPU's two power states, the same registers as P105.  J33i's ADT sgx node
+		 * has clock-gates <64> (power-gates "@"); device-clocks entry 64 "GFX" has no
+		 * register of its own and parents 30 and 31: GFX_SYS-CLK (power index 9 ->
+		 * +0x1024) and GFX-CLK (index 10 -> +0x1028).  P105's gate id is 92, the
+		 * parents and registers are identical.  iBoot leaves both at 0x300 (off), as
+		 * on P105.  HPERF-NRT (+0x102c) is not needed (P105-tested).  apple-sgx
+		 * enables them in this order. */
+		gfx_sys_ps: gfx-sys-ps@f101024 {
+			compatible = "apple,s5l8940x-pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0xf101024 0x4>;
+			clocks = <&uart_clk>;
+			clock-output-names = "gfx_sys_ps";
+		};
+
+		gfx_ps: gfx-ps@f101028 {
+			compatible = "apple,s5l8940x-pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0xf101028 0x4>;
+			clocks = <&uart_clk>;
+			clock-output-names = "gfx_ps";
+		};
+
+		/* PowerVR SGX543 (ADT sgx@5100000, "gpu,s5l8940x", IRQ 49, brn_31195 = 1),
+		 * as P105's node.  The ADT's second window, 0x3f10b000, is left out as on
+		 * P105.  Six 16 KiB banks: 0 is broadcast and WRITE-ONLY (a read hangs the
+		 * bus), 1 the master, 2 + n core n.  The core count (MP1 or MP2) is read
+		 * from MASTER_CORE_ID at probe, as iOS does (SGXDriver543::start, 12H847
+		 * 0x80ba0820); the ADT has no sgx-core-count.  docs/research/j33i-gpu.md. */
+		sgx: gpu@5100000 {
+			compatible = "apple,s5l8940x-sgx";
+			reg = <0x5100000 0x18000>;
+			interrupts = <49>;
+			clocks = <&gfx_sys_ps>, <&gfx_ps>;
+			clock-names = "gfx_sys", "gfx";
+			apple,brn-31195;
+		};
+
 		/* HDMI audio: I2S0 sends the samples, slave to the I2S master's clocks
 		 * (NCO 0, 342 MHz reference); CDMA channel 0x17 on request 1 (the ADT's
 		 * i2s0 dma-channels) feeds it; the HDMI TX's I2S receiver takes them.

@@ -6,6 +6,8 @@
 #   iBSS.pwned                   kloader payload (signature patch)
 #   iBEC.patched.autogo.plain.dfu  iBEC + autogo -- boots Linux, but iBEC has no HDMI driver
 #   iBoot.as-ibec.plain.dfu      full iBoot + autogo, packed as an iBEC: lights HDMI (default)
+#   sgx543.fw                    the GPU microkernel, from the decrypted kernelcache
+#                                (KC_J33I, default ../work/kc.j33i.macho), if it is there
 #
 #   IPSW=path/to/AppleTV3,2_8.4.2_12H847_Restore.ipsw scripts/build-firmware-j33i.sh
 set -euo pipefail
@@ -34,3 +36,12 @@ python3 /cascadia/scripts/patch-ibec-autogo.py --board j33i-iboot iBoot.patched 
 python3 /cascadia/scripts/img3pack.py iBEC.j33i.RELEASE.dfu iBEC.autogo iBEC.patched.autogo.plain.dfu
 python3 /cascadia/scripts/img3pack.py iBEC.j33i.RELEASE.dfu iBoot.autogo iBoot.as-ibec.plain.dfu
 md5sum iBSS.pwned iBEC.autogo iBoot.autogo"
+
+# The GPU microkernel: on the host (the kernelcache lives outside this tree, and
+# --kernelcache needs nothing but python3).  Byte-identical to the iPad's.
+KC_J33I="${KC_J33I:-$ROOT/../work/kc.j33i.macho}"
+if [ -f "$KC_J33I" ]; then
+    python3 "$ROOT/scripts/extract-sgx-firmware.py" --kernelcache "$KC_J33I" "$OUT/sgx543.fw"
+else
+    echo "note: no $KC_J33I -- no GPU microkernel (scripts/extract-sgx-firmware.py --kernelcache)"
+fi

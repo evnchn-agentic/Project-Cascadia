@@ -295,10 +295,24 @@ cmd_build() {
     fi
     # The GPU's microkernel, for drivers/gpu/drm/apple-sgx.  Apple's, so it
     # comes out of the kernelcache like the rest (scripts/extract-sgx-firmware.py).
-    if [ -s "$ROOT/build/firmware/sgx543.fw" ]; then
+    # J33i's is the same file, cut from its own decrypted 12H847 kernelcache
+    # (KC_J33I, by default ../work/kc.j33i.macho) the first time it is missing.
+    SGXFW="$ROOT/build/firmware/sgx543.fw"
+    if [ "$BOARD" = j33iap ]; then
+        SGXFW="$ROOT/build/firmware-j33i/sgx543.fw"
+        KC_J33I="${KC_J33I:-$ROOT/../work/kc.j33i.macho}"
+        if [ ! -s "$SGXFW" ] && [ -f "$KC_J33I" ]; then
+            mkdir -p "$ROOT/build/firmware-j33i"
+            python3 "$ROOT/scripts/extract-sgx-firmware.py" --kernelcache "$KC_J33I" "$SGXFW" >/dev/null \
+                || fail "could not extract the GPU microkernel from $KC_J33I"
+        fi
+    fi
+    if [ -s "$SGXFW" ]; then
         mkdir -p "$ROOT/build/initramfs-root/lib/firmware/apple"
-        cp "$ROOT/build/firmware/sgx543.fw" "$ROOT/build/initramfs-root/lib/firmware/apple/"
-        note "ok: GPU microkernel from the IPSW (build/firmware/sgx543.fw)"
+        cp "$SGXFW" "$ROOT/build/initramfs-root/lib/firmware/apple/sgx543.fw"
+        note "ok: GPU microkernel (${SGXFW#$ROOT/})"
+    elif [ "$BOARD" = j33iap ]; then
+        note "note: no GPU microkernel -- set KC_J33I= to the decrypted 12H847 kernelcache"
     else
         note "note: no GPU microkernel -- ./cascadia firmware extracts it from the IPSW"
     fi
