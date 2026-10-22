@@ -227,9 +227,9 @@ static void s5l_dma_stop(struct s5l_hdmi *a)
 static int s5l_dma_start(struct s5l_hdmi *a, unsigned int first)
 {
 	void __iomem *ch = s5l_ch(a);
-	/* 16-bit (the FIFO takes a sample a write), burst 4, memory to device. Measured on an HDMI
-	 * capture: the right channel arrives bit-exact, the left is missing (open); 32-bit writes
-	 * gave silence. */
+	/* 16-bit (the FIFO takes a sample a write), burst 4, memory to device. A stereo test file
+	 * captured off HDMI matches stock iOS playing the same file, segment for segment (32-bit
+	 * writes gave silence). */
 	u32 dcr = (a->req << 16) | 0x20 | 0x04 | 0x02;
 
 	writel(CDMA_CSR_CLEAR, ch + CDMA_CSR);
