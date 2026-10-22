@@ -22,7 +22,7 @@ exec ${WRAP:-} python3 /root/piglit/bin/piglit run -p gbm --timeout 900 quick_gl
     -x 'glsl-1\.[3-5]0' -x 'glsl-[34]\.' -x 'glsl-es-3' -x '!opengl [34]\.' \
     -x 'arb_gpu_shader' -x 'arb_tessellation' -x 'arb_compute' -x 'arb_shader_image' \
     -x 'arb_vertex_attrib_64bit' -x 'arb_gl_spirv' -x 'arb_shader_storage' \
-    -x 'arb_uniform_buffer' -x 'transform_feedback' -x 'arb_geometry' -x 'arb_bindless' \
+    -x 'transform_feedback' -x 'arb_geometry' -x 'arb_bindless' \
     -x 'arb_sparse' -x 'arb_direct_state' -x 'arb_shader_atomic' -x 'arb_indirect' \
     -x 'arb_multi_draw_indirect' -x 'arb_texture_cube_map_array' -x 'arb_texture_buffer' \
     -x 'arb_sample_shading' -x 'arb_texture_multisample' -x 'arb_viewport_array' \

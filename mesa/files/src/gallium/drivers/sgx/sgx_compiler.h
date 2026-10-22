@@ -140,6 +140,9 @@ struct sgx_vs {
    /* uniform words in memory after the nuniforms of sa (M32), their
     * address less 4 in sa word ubuf_sa -- as a pixel program's */
    unsigned nubuf, ubuf_sa;
+   /* (M43) its uniform buffers, as a pixel program's (ubo_mask, ubo_sa) */
+   uint16_t ubo_mask;
+   uint8_t ubo_sa[SGX_FRAME_MAX_UBOS];
    unsigned varying_slot[SGX_FRAME_MAX_VARYINGS];
    unsigned nvaryings;
    /* (M39) the fragment shader's SGX_FIX_* for each varying, and from sa

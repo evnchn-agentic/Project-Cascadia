@@ -1620,6 +1620,31 @@ add_vs_draw(struct sgx_context *ctx, struct sgx_vs *vs, const struct sgx_fs *fs,
 /* One draw added to the gathered render: the draw module's triangles
  * (ctx->verts, ctx->nverts), in pieces when they are more than one draw of
  * a render takes -- or, with ctx->gpu_vs, a vertex shader's (ctx->vtx) */
+/* (M43) A stage's uniform buffers (ARB_uniform_buffer_object): each one
+ * the program reads made the GPU's (its copy, M26), its address less 4 in
+ * the program's sa word for it, the buffer added to bos (once).  False if
+ * one is not there: the draw goes without. */
+static bool
+ubo_words(struct sgx_context *ctx, unsigned stage, uint16_t mask, const uint8_t *ubo_sa,
+          uint32_t *sa, struct sgx_bo **bos, unsigned *nbos)
+{
+   u_foreach_bit(k, mask) {
+      const struct pipe_constant_buffer *u = &ctx->ubo[stage][k];
+      struct sgx_bo *bo;
+      unsigned i;
+
+      if (!u->buffer || !(bo = sgx_buffer_bo(ctx, sgx_resource(u->buffer), u->buffer_offset,
+                                             u->buffer_offset + u->buffer_size)))
+         return false;
+      sa[ubo_sa[k]] = bo->va + u->buffer_offset - 4;
+      for (i = 0; i < *nbos && bos[i] != bo; i++)
+         ;
+      if (i == *nbos)
+         bos[(*nbos)++] = bo;
+   }
+   return true;
+}
+
 static void
 submit(struct sgx_context *ctx)
 {
@@ -1636,6 +1661,8 @@ submit(struct sgx_context *ctx)
    unsigned nsa = fs ? fs->prog.nsa + fs->prog.nubuf : 0;
    unsigned max, done = 0, npass = 1;
    uint32_t face_stencil[2];
+   struct sgx_bo *fs_bos[SGX_FRAME_MAX_UBOS];
+   unsigned nfs_bos = 0;
    bool two_sided = false;
    struct sgx_frame_state pass[2];
    struct sgx_frame_target target;
@@ -1774,6 +1801,14 @@ submit(struct sgx_context *ctx)
       if (fs->prog.nubuf && ctx->fs_constants)
          memcpy(sa + fs->prog.nsa, ctx->fs_constants,
                 MIN2(fs->prog.nubuf, ctx->fs_constants_size / 4) * sizeof(float));
+      /* (M43) its uniform buffers */
+      if (fs->prog.ubo_mask &&
+          !ubo_words(ctx, 1, fs->prog.ubo_mask, fs->prog.ubo_sa, sa, fs_bos, &nfs_bos)) {
+         mesa_logw_once("sgx: a uniform buffer the fragment shader reads is not bound: the "
+                        "draw dropped");
+         ctx->nverts = 0;
+         return;
+      }
       for (unsigned i = 0; i < fs->nsamplers; i++) {
          unsigned unit = fs->sampler_unit[i];
          struct pipe_sampler_view *view = unit < ARRAY_SIZE(ctx->fs_views) ?
@@ -1833,6 +1868,19 @@ submit(struct sgx_context *ctx)
       }
    }
 
+   {
+      /* (M43) the fragment shader's uniform buffers with the draw's */
+      struct sgx_vtx *v = &ctx->vtx;
+
+      for (unsigned i = 0; vs && i < nfs_bos; i++) {
+         unsigned j;
+
+         for (j = 0; j < v->nbos && v->bos[j] != fs_bos[i]; j++)
+            ;
+         if (j == v->nbos && v->nbos < ARRAY_SIZE(v->bos))
+            v->bos[v->nbos++] = fs_bos[i];
+      }
+   }
    for (unsigned k = 0; vs && k < npass; k++)
       add_vs_draw(ctx, vs, fs, sa, nsa, tex, &target, &pass[k]);
 
@@ -1844,7 +1892,7 @@ submit(struct sgx_context *ctx)
 
       /* room in this render: a draw, its vertices, its textures */
       if ((b->ndraws == sgx_frame_max_draws(screen->frame) && no_room(ROOM_DRAWS)) ||
-          (b->ntex + b->nbos + b->nvchunks + more_handles(ctx, tex, ntex, NULL, 0) >
+          (b->ntex + b->nbos + b->nvchunks + more_handles(ctx, tex, ntex, fs_bos, nfs_bos) >
               SGX_FRAME_MAX_HANDLES && no_room(ROOM_HANDLES)) ||
           (!tex_room(ctx, tex, ntex) && no_room(ROOM_TEXTURES)) ||
           (batch_bytes(b) + n * vf * sizeof(float) > SGX_FRAME_MAX_BYTES && no_room(ROOM_BYTES)))
@@ -1856,7 +1904,7 @@ submit(struct sgx_context *ctx)
          batch_start(ctx, &target);
       /* from now on sampled linear: decided before any draw samples it */
       target.res->gpu_written = true;
-      add_handles(ctx, tex, ntex, NULL, 0);
+      add_handles(ctx, tex, ntex, fs_bos, nfs_bos);
       note_zs(ctx, &st);
       bd = &b->draw[b->ndraws++];
       memset(bd, 0, sizeof(*bd));
@@ -2428,6 +2476,10 @@ gpu_vs_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
          memset((uint8_t *)(ctx->vs_sa + vs->nuniforms) + m, 0, vs->nubuf * 4 - m);
       }
    }
+   /* (M43) its uniform buffers: their addresses, the buffers the draw's
+    * (one not bound: the draw module's way, which reads them mapped) */
+   if (vs->ubo_mask && !ubo_words(ctx, 0, vs->ubo_mask, vs->ubo_sa, ctx->vs_sa, v->bos, &v->nbos))
+      return false;
    /* (M39) a rectangle texture's 1 / width, 1 / height for each varying
     * whose x and y the vertex side scales */
    for (unsigned k = 0, n = 0; k < vs->nvaryings; k++) {
@@ -2559,6 +2611,20 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             p += cb->buffer_offset;
       }
       draw_set_mapped_constant_buffer(draw, MESA_SHADER_VERTEX, 0, p, p ? cb->buffer_size : 0);
+   }
+   /* (M43) and its uniform buffers, mapped */
+   for (unsigned k = 1; k < SGX_FRAME_MAX_UBOS; k++) {
+      const struct pipe_constant_buffer *u = &ctx->ubo[0][k];
+      const uint8_t *p = u->user_buffer;
+
+      if (!p && u->buffer) {
+         size_t whole;
+
+         p = map_buffer(u->buffer, &whole);
+         if (p)
+            p += u->buffer_offset;
+      }
+      draw_set_mapped_constant_buffer(draw, MESA_SHADER_VERTEX, k, p, p ? u->buffer_size : 0);
    }
 
    update_vertex_info(ctx);

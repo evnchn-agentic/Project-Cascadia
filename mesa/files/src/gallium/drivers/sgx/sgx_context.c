@@ -960,6 +960,9 @@ sgx_set_constant_buffer(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (index == 0 && (shader == MESA_SHADER_VERTEX || shader == MESA_SHADER_FRAGMENT))
       util_copy_constant_buffer(&ctx->cb[shader == MESA_SHADER_FRAGMENT], cb);
+   else if (index < SGX_FRAME_MAX_UBOS &&
+            (shader == MESA_SHADER_VERTEX || shader == MESA_SHADER_FRAGMENT))
+      util_copy_constant_buffer(&ctx->ubo[shader == MESA_SHADER_FRAGMENT][index], cb);
 }
 
 static void
@@ -1041,6 +1044,9 @@ sgx_context_destroy(struct pipe_context *pctx)
    util_set_vertex_buffers_mask(ctx->vb, &ctx->vb_mask, NULL, 0);
    for (unsigned i = 0; i < ARRAY_SIZE(ctx->cb); i++)
       pipe_resource_reference(&ctx->cb[i].buffer, NULL);
+   for (unsigned i = 0; i < 2; i++)
+      for (unsigned k = 0; k < SGX_FRAME_MAX_UBOS; k++)
+         pipe_resource_reference(&ctx->ubo[i][k].buffer, NULL);
    if (pctx->stream_uploader)
       u_upload_destroy(pctx->stream_uploader);
    sgx_fence_reference(&ctx->last, NULL);

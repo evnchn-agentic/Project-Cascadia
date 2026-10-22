@@ -17,6 +17,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* (M43) the constant buffers a stage may have: 0 the uniforms, 1..15
+ * uniform buffers */
+#define SGX_FRAME_MAX_UBOS 16
+
 struct sgx_device;
 struct sgx_fence;
 struct sgx_resource;
@@ -122,8 +126,8 @@ sgx_frame_vertex_floats(const struct sgx_frame_layout *l)
  * draw hands them over).  The frame puts the code and its PDS program in
  * GPU memory at the first draw, once, and keeps where in code_va, pds_va. */
 /* the uniform words a program may have in memory (M32): constant buffer
- * 0's, as the screen says them -- a vertex shader's 137 vec4s */
-#define SGX_UBUF_MAX (137 * 4)
+ * 0's, as the screen says them -- a vertex shader's 265 vec4s (M43) */
+#define SGX_UBUF_MAX (265 * 4)
 
 struct sgx_pixel_program {
    uint64_t *code;
@@ -142,6 +146,10 @@ struct sgx_pixel_program {
    /* uniform words in memory after the nsa (M32): the draw's words go on
     * with them, and sa word ubuf_sa has their address less 4 */
    unsigned nubuf, ubuf_sa;
+   /* (M43) the uniform buffers it reads (ARB_uniform_buffer_object: bit k
+    * for buffer k, 1..15), each one's address less 4 in sa word ubo_sa[k] */
+   uint16_t ubo_mask;
+   uint8_t ubo_sa[SGX_FRAME_MAX_UBOS];
    /* lookups the PDS makes before the program runs (M35): texture k's
     * texel, as it is (four bytes), into the primary attribute after the
     * inputs' (pa4 ninputs + k), the coordinates varying fetch_src[k]'s x

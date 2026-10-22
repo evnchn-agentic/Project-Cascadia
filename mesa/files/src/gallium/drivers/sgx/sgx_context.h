@@ -161,7 +161,9 @@ struct sgx_vtx {
    unsigned nverts;
    unsigned count, max_index;
    bool indexed;
-   struct sgx_bo *bos[SGX_VS_MAX_ATTRIBS];
+   /* the buffers the draw reads: its attributes', and (M43) its uniform
+    * buffers', both stages' */
+   struct sgx_bo *bos[SGX_VS_MAX_ATTRIBS + 2 * SGX_FRAME_MAX_UBOS];
    unsigned nbos;
    /* repacked (M42): where the stream was written -- the batch's chunk
     * vchunk (referenced), vdata for the CPU, vdata_va for the GPU -- when
@@ -179,6 +181,8 @@ struct sgx_context {
    struct pipe_vertex_buffer vb[PIPE_MAX_ATTRIBS];
    uint32_t vb_mask;
    struct pipe_constant_buffer cb[2];   /* buffer 0: the vertex, fragment shader's */
+   /* (M43) the uniform buffers, 1..15, of the vertex and fragment shader */
+   struct pipe_constant_buffer ubo[2][SGX_FRAME_MAX_UBOS];
    struct sgx_shader *vs, *fs;
    /* blending, depth (M14) */
    const struct pipe_blend_state *blend;

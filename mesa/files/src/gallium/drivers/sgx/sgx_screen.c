@@ -236,11 +236,14 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
    caps->max_control_flow_depth = 32;
    caps->max_inputs = 16;
    caps->max_outputs = 10;     /* position, point size, 8 varyings */
-   /* GLES 2's 128 vec4s, and the 8 clip planes and point size the state
-    * tracker keeps room for (it took them out of the 128: 119, M32) --
-    * past sa's words they are in memory */
-   caps->max_const_buffer0_size = (128 + 8 + 1) * 4 * sizeof(float);
-   caps->max_const_buffers = 1;
+   /* OpenGL 3's 256 vec4s (1024 components, M43; GLES 2's 128 before),
+    * and the 8 clip planes and point size the state tracker keeps room for
+    * (it takes them out: M32) -- past sa's words they are in memory */
+   caps->max_const_buffer0_size = (256 + 8 + 1) * 4 * sizeof(float);
+   /* (M43) uniform buffers 1..15, read from memory (VLDST), through an
+    * index too: ARB_uniform_buffer_object */
+   caps->max_const_buffers = SGX_FRAME_MAX_UBOS;
+   caps->indirect_const_addr = true;
    caps->max_temps = 64;
 
    caps = (struct pipe_shader_caps *)&pscreen->shader_caps[MESA_SHADER_FRAGMENT];
@@ -249,8 +252,12 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
    caps->max_control_flow_depth = 32;
    caps->max_inputs = 8;
    caps->max_outputs = 1;
-   caps->max_const_buffer0_size = 64 * 4 * sizeof(float);
-   caps->max_const_buffers = 1;
+   /* 256 vec4s as the vertex shader's (64 before M43), and the alpha
+    * test's reference the state tracker keeps room for -- in memory past
+    * sa's words, as there */
+   caps->max_const_buffer0_size = (256 + 1) * 4 * sizeof(float);
+   caps->max_const_buffers = SGX_FRAME_MAX_UBOS;
+   caps->indirect_const_addr = true;
    caps->max_temps = 64;
    caps->max_texture_samplers = caps->max_sampler_views = 8;
 }
@@ -310,6 +317,10 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    /* (M43) ARB_blend_func_extended: blending is the program's, the second
     * colour another output nir_lower_blend takes in */
    caps->max_dual_source_render_targets = 1;
+   /* (M43) a uniform buffer's words read by VLDST: 64 KiB of them, from any
+    * multiple of 16 bytes */
+   caps->max_constant_buffer_size = 65536;
+   caps->constant_buffer_offset_alignment = 16;
    /* (M43) ARB_timer_query: the GPU's times are its fences' signal times
     * (CLOCK_MONOTONIC, the kernel's), screen->get_timestamp the same clock */
    caps->query_timestamp = true;

@@ -38,6 +38,7 @@
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "util/bitscan.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "compiler/nir/nir_lower_blend.h"
 #include "util/format/u_formats.h"
@@ -87,6 +88,10 @@ struct comp {
     * the rest -- otherwise words 0..sa_uniforms in sa, and all of them in
     * memory, read by VLDST from the address (less 4) in sa word ubuf_sa */
    unsigned uwords, sa_uniforms, ubuf_sa;
+   /* (M43) the uniform buffers read (bit k for buffer k), each one's
+    * address less 4 in sa word ubo_sa[k] */
+   uint16_t ubo_mask;
+   unsigned ubo_sa[SGX_FRAME_MAX_UBOS];
    bool ubuf;
    /* a fragment program whose branches go alike for every pixel (M33):
     * the pixels run together, the branches all of theirs -- or one with
@@ -1043,13 +1048,22 @@ scan(struct comp *c, nir_function_impl *impl)
             nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
             unsigned at;
 
-            if (in->intrinsic == nir_intrinsic_load_uniform &&
+            if (in->intrinsic == nir_intrinsic_load_ubo) {
+               /* (M43) a uniform buffer: its address in sa.  The uniforms
+                * are load_uniform's (lower_uniforms_to_ubo is off): block
+                * k is the state tracker's constant buffer k + 1 */
+               if (!nir_src_is_const(in->src[0]) ||
+                   nir_src_as_uint(in->src[0]) + 1 >= SGX_FRAME_MAX_UBOS) {
+                  fail(c, "a uniform buffer chosen by an index");
+                  return;
+               }
+               c->ubo_mask |= 1u << (nir_src_as_uint(in->src[0]) + 1);
+            } else if (in->intrinsic == nir_intrinsic_load_uniform &&
                 !nir_src_is_const(in->src[0])) {
                /* an array read through an index: all of it (M21) */
                at = (nir_intrinsic_base(in) + nir_intrinsic_range(in)) * 4;
                c->uwords = MAX2(c->uwords, at);
-            } else if ((in->intrinsic == nir_intrinsic_load_uniform ||
-                        in->intrinsic == nir_intrinsic_load_ubo) && uniform_word(c, in, &at)) {
+            } else if (in->intrinsic == nir_intrinsic_load_uniform && uniform_word(c, in, &at)) {
                c->uwords = MAX2(c->uwords, at + in->def.num_components);
             }
             if (in->intrinsic == nir_intrinsic_terminate ||
@@ -1099,6 +1113,7 @@ scan(struct comp *c, nir_function_impl *impl)
       extra = c->vs ? 4 * nconst + 4 :
                       (c->nsamplers ? 3 + 4 * c->nsamplers : 0) + (c->blend_sa >= 0 ? 4 : 0) +
                       (c->scales ? 4 + 2 * c->nsamplers : 0);
+      extra += util_bitcount(c->ubo_mask);
       c->ubuf = c->uwords + extra > 128;
       if (c->ubuf) {
          c->sa_uniforms = MIN2(c->uwords, (128 - extra - 4) & ~3u);
@@ -1107,6 +1122,9 @@ scan(struct comp *c, nir_function_impl *impl)
       } else {
          c->sa_uniforms = c->nuniforms = c->uwords;
       }
+      /* (M43) the uniform buffers' addresses */
+      u_foreach_bit(k, c->ubo_mask)
+         c->ubo_sa[k] = c->nuniforms++;
    }
    c->sampler_sa = align(c->nuniforms, 4);
    c->pa_base = 4 * MAX2(c->nattrs, 1);
@@ -1135,21 +1153,12 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
 static bool
 uniform_word(struct comp *c, nir_intrinsic_instr *in, unsigned *at)
 {
-   if (in->intrinsic == nir_intrinsic_load_uniform) {
-      /* vec4 slots (the screen does not pack uniforms) */
-      if (!nir_src_is_const(in->src[0])) {
-         fail(c, "an indirect uniform");
-         return false;
-      }
-      *at = (nir_intrinsic_base(in) + nir_src_as_uint(in->src[0])) * 4;
-   } else {
-      if (!nir_src_is_const(in->src[0]) || nir_src_as_uint(in->src[0]) ||
-          !nir_src_is_const(in->src[1])) {
-         fail(c, "an indirect or second constant buffer");
-         return false;
-      }
-      *at = nir_src_as_uint(in->src[1]) / 4;
+   /* vec4 slots (the screen does not pack uniforms) */
+   if (!nir_src_is_const(in->src[0])) {
+      fail(c, "an indirect uniform");
+      return false;
    }
+   *at = (nir_intrinsic_base(in) + nir_src_as_uint(in->src[0])) * 4;
    return true;
 }
 
@@ -1208,6 +1217,52 @@ memory_uniform(struct comp *c, nir_intrinsic_instr *in, unsigned at, bool indexe
 
       emit(c, usse_limm(t, 4u << 16 | at));
       emit(c, usse_ldr_reg(treg(c, r), c->ubuf_sa, t, n));
+   }
+   emit(c, USSE_WDF0);
+   scratch_give_back(c, &s);
+   for (unsigned i = 0; i < n; i++) {
+      c->loc[id + i] = treg(c, r + i);
+      c->owned[id + i] = c->last_use[id + i] >= 0;
+      if (!c->owned[id + i])
+         give_back(c, r + i);
+   }
+}
+
+/* (M43) a uniform buffer's words (ARB_uniform_buffer_object): VLDST from
+ * the buffer's address in sa word ubo_sa[k], at the offset in bytes --
+ * a constant, or the program's (a float, the integers being floats here:
+ * a quarter of it made an integer as memory_uniform() makes one) */
+static void
+ubo_load(struct comp *c, nir_intrinsic_instr *in, unsigned k)
+{
+   unsigned id = in->def.index * 4, n = in->def.num_components, r = block(c, n, 1);
+   unsigned sa = c->ubo_sa[k];
+   struct scratch s = { 0 };
+
+   if (nir_src_is_const(in->src[1])) {
+      /* (an offset made a float with the integers -- 16 bytes 0x41800000
+       * -- or one made after them, an integer: a multiple of 4 under
+       * 2^24, never as large as 1.0's bits) */
+      uint32_t bits = nir_src_as_uint(in->src[1]);
+      unsigned at = (bits >= 0x3f800000u ? (unsigned)nir_src_as_float(in->src[1]) : bits) / 4;
+
+      if (at < 128) {
+         emit(c, usse_ldr_imm(treg(c, r), sa, at, n));
+      } else {
+         struct usse_reg t = treg(c, scratch_take(c, &s));
+
+         emit(c, usse_limm(t, 4u << 16 | at));
+         emit(c, usse_ldr_reg(treg(c, r), sa, t, n));
+      }
+   } else {
+      struct operand off = resolve(nir_get_scalar(in->src[1].ssa, 0));
+      struct usse_reg t = treg(c, scratch_take(c, &s));
+
+      emit(c, usse_fmad(t, get(c, off, TAKES_ABS | TAKES_LANE_Y, &s), constant(c, &s, 0.25f),
+                        constant(c, &s, 8388608.0f)));
+      emit(c, usse_vbw_and(t, t, 0xffff));
+      emit(c, usse_vbw_or_rot(t, t, 4, 16));
+      emit(c, usse_ldr_reg(treg(c, r), sa, t, n));
    }
    emit(c, USSE_WDF0);
    scratch_give_back(c, &s);
@@ -1320,8 +1375,6 @@ intrinsic(struct comp *c, nir_intrinsic_instr *in)
             indirect_uniform(c, in);
          return;
       }
-      FALLTHROUGH;
-   case nir_intrinsic_load_ubo:
       if (!uniform_word(c, in, &at))
          return;
       if (at + in->def.num_components > c->sa_uniforms) {
@@ -1330,6 +1383,10 @@ intrinsic(struct comp *c, nir_intrinsic_instr *in)
       }
       for (unsigned i = 0; i < in->def.num_components; i++)
          c->loc[id + i] = usse_reg(USSE_SA, at + i);
+      return;
+   case nir_intrinsic_load_ubo:
+      /* (M43: block k, constant buffer k + 1 -- scan()) */
+      ubo_load(c, in, nir_src_as_uint(in->src[0]) + 1);
       return;
    case nir_intrinsic_ddx:
    case nir_intrinsic_ddx_fine:
@@ -3013,6 +3070,9 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
    c.fs->nuniforms = c.sa_uniforms;
    c.fs->prog.nubuf = c.ubuf ? c.uwords : 0;
    c.fs->prog.ubuf_sa = c.ubuf_sa;
+   c.fs->prog.ubo_mask = c.ubo_mask;
+   for (unsigned k = 0; k < SGX_FRAME_MAX_UBOS; k++)
+      c.fs->prog.ubo_sa[k] = c.ubo_mask >> k & 1 ? c.ubo_sa[k] : 0;
    c.fs->nsamplers = c.nsamplers;
    c.fs->sampler_sa = c.sampler_sa;
    c.fs->prog.nsa = c.blend_sa >= 0 ? c.blend_sa + 4 :
@@ -3126,6 +3186,9 @@ compile_vs(const nir_shader *vs, const unsigned *varying_slot, unsigned nvarying
    c.vs->nuniforms = c.nuniforms;
    c.vs->nubuf = c.ubuf ? c.uwords : 0;
    c.vs->ubuf_sa = c.ubuf_sa;
+   c.vs->ubo_mask = c.ubo_mask;
+   for (unsigned k = 0; k < SGX_FRAME_MAX_UBOS; k++)
+      c.vs->ubo_sa[k] = c.ubo_mask >> k & 1 ? c.ubo_sa[k] : 0;
 
 out:
    util_dynarray_fini(&c.code);
