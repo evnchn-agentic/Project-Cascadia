@@ -9,7 +9,8 @@
 # Mesa itself is fetched on the host beforehand (mesa/fetch.sh, which
 # ./cascadia mesa runs first: git under emulation is far too slow); this
 # repository has the driver (mesa/files, copied into the tree) and the few
-# lines that register it (mesa/mesa.patch).  The first build takes long
+# lines that register it, with the fixes to Mesa's own code the driver's
+# tests ran into (mesa/mesa.patch).  The first build takes long
 # under ARM emulation; after that only what changed is built again.
 set -eu
 ROOT=/cascadia
