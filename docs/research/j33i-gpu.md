@@ -305,3 +305,21 @@ Userspace (the pack, sgx2d, Mesa), highest first:
 11. sgx2d does not compare the pack's screen with the kernel's framebuffer. A
     1080p pack on a 720p framebuffer writes past the end of it. Only `sgxinfo`
     guards against that.
+
+## Measured on the box, 2026-10-22 14:57 (Mesa 26.1.8 release, sgx pack 1920x1080, MP1)
+
+Mesa built on the Mac (`./cascadia mesa`, ~45 min of armv7 emulation) and installed into the RAM root with
+`MESA_BUILD=release mesa/install.py --install root@BOX`; runtime libraries from Alpine 3.24 over Ethernet:
+`apk add libx11 libxext libxxf86vm libdrm libxcb libxshmfence libxrandr libxfixes libxdamage expat
+zstd-libs libelf wayland-libs-client wayland-libs-server libstdc++ libgcc` (lost at reboot, like Mesa).
+
+| Test | Result |
+|---|---|
+| `sgx-gl glclear` | OpenGL ES 2.0 Mesa 26.1.8, "SGX543MP1 rev 1.2.2, clears on the GPU" |
+| `sgx-gl gltri` | 11 of 11 checks right |
+| `sgx-gl glfs` | 40 of 40 shader cases right |
+| `sgx-gl glspeed 400 40 flush` | 8.86 ms a frame, 45 160 draws a second |
+| `sgx-gl glkms` (KMS, 1920x1080) | 300 frames, 41.3 fps, "the screen: every pixel right"; HDMI capture matches |
+| sgx2d `sprites 200 600` | 80.0 fps at 1920x1080 |
+
+GL_RENDERER still says "SGX543MP2" (a fixed string in the driver); the kernel and Mesa's info line say MP1.
