@@ -239,8 +239,10 @@ def main():
                       0x40 + len(data), len(const), daddr, caddr,
                       BUILD.encode())
     hdr += b"\0" * (0x40 - len(hdr))
-    with open(out, "wb") as fh:
+    # temp file + rename: a cut-short write must not leave a file the build later trusts
+    with open(out + ".tmp", "wb") as fh:
         fh.write(hdr + data + const)
+    os.replace(out + ".tmp", out)
     print(f"  {out}: microkernel 0x{len(data):x} + templates 0x{len(const):x} "
           f"bytes from IMGSGX543 ({BUILD})")
     if kc_out:

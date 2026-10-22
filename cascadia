@@ -311,10 +311,14 @@ cmd_build() {
         mkdir -p "$ROOT/build/initramfs-root/lib/firmware/apple"
         cp "$SGXFW" "$ROOT/build/initramfs-root/lib/firmware/apple/sgx543.fw"
         note "ok: GPU microkernel (${SGXFW#$ROOT/})"
-    elif [ "$BOARD" = j33iap ]; then
-        note "note: no GPU microkernel -- set KC_J33I= to the decrypted 12H847 kernelcache"
     else
-        note "note: no GPU microkernel -- ./cascadia firmware extracts it from the IPSW"
+        # no stale copy from the other board's build in the shared initramfs tree
+        rm -f "$ROOT/build/initramfs-root/lib/firmware/apple/sgx543.fw"
+        if [ "$BOARD" = j33iap ]; then
+            note "note: no GPU microkernel -- set KC_J33I= to the decrypted 12H847 kernelcache"
+        else
+            note "note: no GPU microkernel -- ./cascadia firmware extracts it from the IPSW"
+        fi
     fi
     # J33i: the sgx2d pack (Mesa's 3D event program, sgx2d's template frame)
     # and the GPU's test programs ride in the image: a RAM root has no NFS root
