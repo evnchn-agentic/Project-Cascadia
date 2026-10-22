@@ -22,7 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pds, programs
 
-W, H = 768, 1024
+# the screen (SGX_SCREEN=WxH; the Apple TV's 1920x1080, mkpack.py sets it)
+W, H = tuple(int(x) for x in os.environ.get('SGX_SCREEN', '768x1024').split('x'))
 GL_VA, GL_SIZE = 0x98956000, 0x6f000
 PDS = GL_VA                       # the 3D pass's PDS block and the pixel programs
 IDX = GL_VA + 0x11000             # the index buffer, 0..8191 (u16)

@@ -18,6 +18,28 @@ def off2va(o):
     for nm,v,vs,fo,fs in SEGS:
         if fo<=o<fo+fs: return v+(o-fo)
     return None
+def find_kext(cstr=b'SGXDriver543\0'):
+    """__TEXT address of the prelinked kext whose __cstring holds CSTR (the
+    GPU kext by default), or None: every prelinked kext is a Mach-O on a page
+    boundary in __PRELINK_TEXT (as scripts/extract-sgx-firmware.py finds it)"""
+    pt = [s for s in SEGS if s[0] == '__PRELINK_TEXT']
+    if not pt: return None
+    _, pva, pvs, pfo, pfs = pt[0]
+    for o in range(pfo, pfo + pfs - 28, 0x1000):
+        if struct.unpack_from('<I', D, o)[0] != 0xfeedface: continue
+        text, off = None, o + 28
+        for _ in range(struct.unpack_from('<I', D, o + 16)[0]):
+            cmd, csz = struct.unpack_from('<II', D, off)
+            if cmd == 1 and D[off+8:off+24].split(b'\0')[0] == b'__TEXT':
+                text = struct.unpack_from('<I', D, off + 24)[0]
+                for k in range(struct.unpack_from('<I', D, off + 48)[0]):
+                    s = off + 56 + 68 * k
+                    if D[s:s+16].split(b'\0')[0] == b'__cstring':
+                        a, n = struct.unpack_from('<II', D, s + 32)
+                        c = va2off(a)
+                        if c is not None and cstr in D[c:c + n]: return text
+            off += csz
+    return None
 def find_str(s):
     b=s.encode() if isinstance(s,str) else s; out=[]; i=0
     while True:

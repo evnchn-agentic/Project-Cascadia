@@ -185,7 +185,8 @@ def ta_cmd(rtdir):
 
 MAPS = ((PB_VA, PB_SIZE), (CMD_VA, 0x1000), (VDM_VA, 0x4000))
 
-FB_VA, FB_STRIDE_PX = 0x90000000, 768
+FB_VA = 0x90000000
+FB_STRIDE_PX = int(os.environ.get('SGX_SCREEN', '768x1024').split('x')[0])  # lines as wide as the screen
 SGX_REGS = 0x35100000            # broadcast register bank (physical)
 
 def emit_to_fb(code, x, y, w=64, h=64):

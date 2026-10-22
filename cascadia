@@ -316,6 +316,42 @@ cmd_build() {
     else
         note "note: no GPU microkernel -- ./cascadia firmware extracts it from the IPSW"
     fi
+    # J33i: the sgx2d pack (Mesa's 3D event program, sgx2d's template frame)
+    # and the GPU's test programs ride in the image: a RAM root has no NFS root
+    # for ./cascadia gpu to install into.  Made the first time they are missing,
+    # from the same kernelcache and the IPSW's root filesystem (cmd_gpu).
+    # SGX_PACK_IMAGE=0 leaves it out (about 280 KB of the bundle).
+    if [ "$BOARD" = j33iap ] && [ "${SGX_PACK_IMAGE:-1}" = 0 ]; then
+        rm -rf "$ROOT/build/initramfs-root/usr/local/lib/sgx2d" "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2"
+        note "note: sgx2d pack left out (SGX_PACK_IMAGE=0)"
+    elif [ "$BOARD" = j33iap ]; then
+        P="$ROOT/build/sgx2d-j33i"
+        if [ ! -s "$P/pack/pack.txt" ] || [ ! -s "$P/pack-mp2/pack.txt" ] || [ ! -x "$P/bin/sgxinfo" ]; then
+            j33i_gpu_pack quiet || true
+        fi
+        if [ -s "$P/pack/pack.txt" ] && [ -s "$P/pack-mp2/pack.txt" ] && [ -x "$P/bin/sgxinfo" ]; then
+            D="$ROOT/build/initramfs-root/usr/local/lib"
+            rm -rf "$D/sgx2d" "$D/sgx2d-mp2"
+            mkdir -p "$D/sgx2d" "$D/sgx2d-mp2"
+            cp -P "$P"/pack/* "$P"/bin/* "$D/sgx2d/"
+            # MP2: only what differs; the rest are links to the MP1 pack's
+            # (the box is an MP1: "SGX543MP1 rev 1.2.2, 1 core(s) up")
+            for f in "$P"/pack-mp2/*; do
+                b=${f##*/}
+                if cmp -s "$f" "$P/pack/$b"; then ln -s "../sgx2d/$b" "$D/sgx2d-mp2/$b"; else cp "$f" "$D/sgx2d-mp2/"; fi
+            done
+            note "ok: sgx2d pack $(sed -n 's/^screen //p' "$P/pack/pack.txt" | tr ' ' x), sgxinfo, sprites, demo2 ($(du -sk "$D/sgx2d" "$D/sgx2d-mp2" | awk '{s += $1} END {print s}') KiB)"
+        else
+            rm -rf "$ROOT/build/initramfs-root/usr/local/lib/sgx2d" "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2"
+            note "note: no sgx2d pack -- BOARD=j33iap ./cascadia gpu builds it (KC_J33I= and the 12H847 IPSW)"
+        fi
+    else
+        # the tree is shared between boards: no J33i pack in another board's
+        # image (sgx2d-mp2 marks one; an sgx2d installed there by hand stays)
+        if [ -d "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2" ]; then
+            rm -rf "$ROOT/build/initramfs-root/usr/local/lib/sgx2d" "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2"
+        fi
+    fi
     # No RTC on this board: without a stamp it boots at the epoch and every TLS
     # handshake fails on notBefore.  Written before the kernel build so it lands
     # inside the embedded initramfs.
@@ -500,7 +536,37 @@ so this is a file in build/initramfs-root owned by some third uid."
 # for the device's binaries -- and installed from the host: into the running
 # device's NFS root over ssh, with SuperTux itself from apk, or else into the
 # root this host exports.
+#
+# J33i (BOARD=j33iap): no IPSW of the iPad and nowhere to install -- the pack is
+# made from the Apple TV's own 12H847 kernelcache (KC_J33I) and IPSW (the GL
+# driver's event program, byte-identical to the iPad's), at 1920x1080, for an
+# MP2 and an MP1, and ./cascadia build puts it in the image.
+j33i_gpu_pack() {
+    local F="$ROOT/build/firmware-j33i" quiet="${1:-}"
+    if [ ! -s "$F/kernelcache.12H847.macho" ] || [ ! -s "$F/gl-event.pds" ]; then
+        if [ -n "$quiet" ]; then
+            ONLY=gpu bash "$ROOT/scripts/build-firmware-j33i.sh" >/dev/null || return 1
+        else
+            ONLY=gpu bash "$ROOT/scripts/build-firmware-j33i.sh" || return 1
+        fi
+    fi
+    [ -s "$F/kernelcache.12H847.macho" ] && [ -s "$F/gl-event.pds" ] || return 1
+    # SGX_SCREEN=1280x720 for a box booted with atv_hdmi=720 (default 1920x1080)
+    local scr="${SGX_SCREEN:-1920x1080}"
+    case "$scr" in [0-9]*x[0-9]*) ;; *) echo "SGX_SCREEN=$scr is not WxH" >&2; return 1 ;; esac
+    if [ -n "$quiet" ]; then
+        in_docker "BOARD=j33iap SGX_SCREEN=$scr python3 tools/sgx/mkpack.py >/dev/null" || return 1
+    else
+        in_docker "BOARD=j33iap SGX_SCREEN=$scr python3 tools/sgx/mkpack.py" || return 1
+    fi
+}
+
 cmd_gpu() {
+    if [ "$BOARD" = j33iap ]; then
+        j33i_gpu_pack || fail "could not build the J33i pack: KC_J33I= (the decrypted 12H847 kernelcache) and IPSW= (the 12H847 IPSW)"
+        say "the pack is in build/sgx2d-j33i; BOARD=j33iap ./cascadia build puts it in the image"
+        return
+    fi
     if [ ! -f "$ROOT/build/firmware/kernelcache.12H321.macho" ] || [ ! -f "$ROOT/build/firmware/gl-event.pds" ]; then
         say "the GPU pack is made from the IPSW: ./cascadia firmware"
         cmd_firmware

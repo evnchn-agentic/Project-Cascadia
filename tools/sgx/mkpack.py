@@ -11,7 +11,7 @@ Building:
 1. the template frame (frame.py): our USSE programs (programs.py), PDS
    programs (pds.py) and state, plus the one PDS template iOS's GL driver
    keeps, out of the IPSW (build/firmware/gl-event.pds)
-2. the kernel's render-target data for a 768x1024 frame: the kext's own code
+2. the kernel's render-target data for the screen (768x1024; SGX_SCREEN): the kext's own code
    run under unicorn (tools/iosgpu/rtemu.py) out of the decrypted 8.4.1
    kernelcache (build/firmware; KC841= overrides)
 3. the template pack (tools/sgx/rpack.py)
@@ -32,8 +32,12 @@ Installing, as /usr/local/lib/sgx2d and /usr/local/bin/supertux-gpu:
 build/sgx2d holds data derived from Apple's kext and GL driver (from the
 IPSW): it stays out of git, like the rest of build/.
 """
-import argparse, io, os, platform, subprocess, sys, tarfile, time
+import argparse, io, os, platform, shutil, subprocess, sys, tarfile, time
 
+# BOARD=j33iap: the Apple TV's 1080p screen (frame.py, rpack.py and rgen.py
+# read SGX_SCREEN); SGX_SCREEN=1280x720 for a box booted with atv_hdmi=720
+if os.environ.get('BOARD') == 'j33iap':
+    os.environ.setdefault('SGX_SCREEN', '1920x1080')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import frame
 
@@ -42,7 +46,17 @@ LIB = os.path.join(ROOT, 'tools', 'sgx', 'lib')
 OUT = os.path.join(ROOT, 'build', 'sgx2d')
 KC = os.path.join(ROOT, 'build', 'firmware', 'kernelcache.12H321.macho')
 EVENT = os.path.join(ROOT, 'build', 'firmware', 'gl-event.pds')
-W, H = 768, 1024
+# BOARD=j33iap (the Apple TV 3): its own 12H847 kernelcache, whose GPU kext is
+# the same code linked 0x51000 lower (rtemu.py finds it), and the event
+# template out of its own dyld cache (byte-identical to the iPad's), both from
+# scripts/build-firmware-j33i.sh; the pack goes to build/sgx2d-j33i
+if os.environ.get('BOARD') == 'j33iap':
+    KC = os.path.join(ROOT, 'build', 'firmware-j33i', 'kernelcache.12H847.macho')
+    EVENT = os.path.join(ROOT, 'build', 'firmware-j33i', 'gl-event.pds')
+    OUT = os.path.join(ROOT, 'build', 'sgx2d-j33i')
+W, H = frame.W, frame.H
+# the render target's per-core parts: SGX_NCORES=1 for an SGX543MP1
+NCORES = int(os.environ.get('SGX_NCORES', '2'))
 RT_GPU_BASE = '0x87c00000'
 DEVICE_FILES = ('libsgxsdl.so', 'sprites', 'demo2', 'sgxinfo', 'supertux.sh')
 PREFIX = 'usr/local/lib/sgx2d'
@@ -60,18 +74,22 @@ def build_pack(pack):
     kc = os.environ.get('KC841') or KC
     for f in (kc, EVENT):
         if not os.path.exists(f):
-            fail('no %s -- run ./cascadia firmware' % os.path.relpath(f, ROOT))
+            fail('no %s -- run %s' % (os.path.relpath(f, ROOT),
+                 'scripts/build-firmware-j33i.sh' if 'firmware-j33i' in f else './cascadia firmware'))
     capdir = os.path.join(OUT, 'frame')
     frame.write(capdir, EVENT)
     pay = os.path.join(capdir, 'payload.txt')
     emu = os.path.join(OUT, 'rtemu')
     os.makedirs(emu, exist_ok=True)
+    for f in os.listdir(emu):       # rgen.py takes the first rt_* it finds: no other size's
+        if f.startswith('rt_'):
+            os.remove(os.path.join(emu, f))
     w = open(pay).read().split()
     w[44], w[45] = '%08x' % W, '%08x' % H
     open(os.path.join(emu, 'payload.txt'), 'w').write(' '.join(w) + '\n')
     env = dict(os.environ, RT_GPU_BASE=RT_GPU_BASE, KC841=os.path.abspath(kc))
     run([sys.executable, os.path.join(ROOT, 'tools', 'iosgpu', 'rtemu.py'), str(W), str(H),
-         '1', '2', 'payload.txt'], cwd=emu, env=env, stdout=subprocess.DEVNULL)
+         '1', str(NCORES), 'payload.txt'], cwd=emu, env=env, stdout=subprocess.DEVNULL)
     run([sys.executable, os.path.join(ROOT, 'tools', 'sgx', 'rpack.py'), capdir, emu, pack],
         stdout=subprocess.DEVNULL)
 
@@ -79,6 +97,47 @@ def build_lib(pack):
     run(['bash', os.path.join(LIB, 'cross.sh')])
     for f in DEVICE_FILES:
         run(['cp', os.path.join(LIB, f), pack])
+
+def build_j33i():
+    """BOARD=j33iap: the pack for the box's SGX543MP1 (pack; e45ef6f's probe
+    line) and for an MP2 (pack-mp2: the render target's per-core parts
+    differ), and the demos and
+    sgxinfo as one static ARM binary (Ubuntu's glibc cross toolchain; no Alpine
+    sysroot to fetch, no SDL, so no libsgxsdl.so).  ./cascadia build puts them
+    in the image."""
+    global NCORES
+    for n, d in ((1, 'pack'), (2, 'pack-mp2')):
+        NCORES = n
+        shutil.rmtree(os.path.join(OUT, d), ignore_errors=True)
+        build_pack(os.path.join(OUT, d))
+    # one static binary, the three called by name (busybox-style): glibc's
+    # static runtime once instead of three times (~0.5 MB less in the image)
+    bin_ = os.path.join(OUT, 'bin')
+    os.makedirs(bin_, exist_ok=True)
+    names = ('sgxinfo', 'sprites', 'demo2')
+    disp = os.path.join(OUT, 'sgx2d-tools.c')
+    open(disp, 'w').write(
+        '#include <string.h>\n' +
+        ''.join('int %s_main(%s);\n' % (n, 'void' if n == 'sgxinfo' else 'int, char **')
+                for n in names) +
+        'int main(int c, char **v)\n{\n\tconst char *b = strrchr(v[0], \'/\');\n'
+        '\tb = b ? b + 1 : v[0];\n' +
+        ''.join('\tif (!strcmp(b, "%s"))\n\t\treturn %s_main(%s);\n'
+                % (n, n, '' if n == 'sgxinfo' else 'c, v') for n in names) +
+        '\treturn 127;\n}\n')
+    cc = ['arm-linux-gnueabihf-gcc', '-static', '-O2', '-Wall', '-Wno-unused-result',
+          '-D_FILE_OFFSET_BITS=64', '-I/usr/arm-linux-gnueabihf/include/drm',
+          '-I' + os.path.join(ROOT, 'patches', 'files', 'include', 'uapi', 'drm'), '-I' + LIB]
+    objs = []
+    for n in names:
+        objs.append(os.path.join(OUT, n + '.o'))
+        run(cc + ['-Dmain=%s_main' % n, '-c', '-o', objs[-1], os.path.join(LIB, n + '.c')])
+    tool = os.path.join(bin_, 'sgx2d-tools')
+    run(cc + ['-s', '-o', tool, disp, os.path.join(LIB, 'sgx2d.c')] + objs + ['-lm'])
+    for n in names:
+        if os.path.lexists(os.path.join(bin_, n)):
+            os.remove(os.path.join(bin_, n))
+        os.symlink('sgx2d-tools', os.path.join(bin_, n))
 
 def tarball(pack):
     """/usr/local/lib/sgx2d and the supertux-gpu link, every entry root's"""
@@ -197,6 +256,12 @@ def main():
                          'this host\'s NFS root, %s)' % default_root())
     a = ap.parse_args()
     pack = os.path.join(OUT, 'pack')
+    if os.environ.get('BOARD') == 'j33iap':
+        if a.install is not None or a.root is not None or a.auto:
+            fail('BOARD=j33iap: the image carries the pack -- BOARD=j33iap ./cascadia build')
+        build_j33i()
+        print('built: %s (%dx%d)' % (os.path.relpath(OUT, ROOT), W, H))
+        return
     if a.install is None and a.root is None and not a.auto:
         build_pack(pack)
         build_lib(pack)

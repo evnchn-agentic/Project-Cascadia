@@ -30,7 +30,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 import programs, rgen
 
-W, H = 768, 1024
+W, H = tuple(int(x) for x in os.environ.get('SGX_SCREEN', '768x1024').split('x'))   # SGX_SCREEN (mkpack.py)
 GL = 0x98956000
 STATE, PDS = 0x989b5000, 0x98956000
 IDX = 0x98967000
@@ -43,7 +43,7 @@ EXT_VA, EXT_SIZE = 0x9b400000, 0x400000
 # after a partial render (the parameter buffer ran out mid-frame) it must
 # bring back what the first pass drew.  So it reads the framebuffer itself,
 # linear (the 2D engine's format: stride field, size, 0x10000000).
-FB_LOAD = ((768 // 4 - 2) << 16 | 0x0e90, 0xcc000000 | (768 - 1) << 12 | (1024 - 1),
+FB_LOAD = ((W // 4 - 2) << 16 | 0x0e90, 0xcc000000 | (W - 1) << 12 | (H - 1),
            rgen.FB_VA, 0x10000000)
 TEXHEAP_VA, TEXHEAP_CHUNK, TEXHEAP_N = 0x9d000000, 0x4000000, 1  # texels, 64 MiB
 

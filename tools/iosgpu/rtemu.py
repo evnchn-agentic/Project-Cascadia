@@ -1,8 +1,11 @@
-# Emulate the IMGSGX543 kext's render-target init (0x80bf7aac) with unicorn.
+# Emulate the IMGSGX543 kext's render-target init (KLO + 0x6aac) with unicorn.
 # Usage: KC841=path/to/kc841.macho python3 rtemu.py W H [samples [ncores [payload.txt]]]
+# KLO, the kext's base, is found in the kernelcache (0x80bf1000 in the iPad's
+# 12H321, 0x80ba0000 in the Apple TV's 12H847: the same kext linked lower);
+# SGX_KEXT_BASE=0x... overrides.  The addresses below are 12H321's, minus 0x80bf1000.
 # Stage 1 runs the RT init on a fake device and dumps the RT object and every buffer it allocates
 # (rt_<W>x<H>_b<i>.bin, GPU VAs faked from 0x87900000). Stage 2 (with a payload of words w0..,
-# hex) runs the per-submit 3D block builder 0x80bf5eec and prints the words the kernel fills in.
+# hex) runs the per-submit 3D block builder (KLO + 0x4eec) and prints the words the kernel fills in.
 # Needs the user's own decrypted 8.4.1 kernelcache; it executes Apple code but writes only results.
 import struct, sys, json
 from unicorn import *
@@ -14,7 +17,9 @@ W = int(sys.argv[1], 0); H = int(sys.argv[2], 0)
 SAMPLES = int(sys.argv[3], 0) if len(sys.argv) > 3 else 1
 NCORES = int(sys.argv[4], 0) if len(sys.argv) > 4 else 2
 
-KLO, KHI = 0x80bf1000, 0x80c20000
+KLO = int(os.environ['SGX_KEXT_BASE'], 0) if os.environ.get('SGX_KEXT_BASE') else (find_kext() or 0x80bf1000)
+KHI = KLO + 0x2f000
+print("kext at %#x" % KLO)
 HEAP, HEAPSZ = 0x10000000, 0x01000000      # fake kernel objects
 BUF, BUFSZ = 0x40000000, 0x04000000        # CPU maps of GPU buffers
 STK, STKSZ = 0x20000000, 0x00100000
@@ -76,8 +81,8 @@ def stub_bzero(r0, r1, *a):
 def stub_memcpy(r0, r1, r2, *a):
     mu.mem_write(r0, bytes(mu.mem_read(r1, r2))); return r0
 
-STUBS = {0x80bfe4f4: ('alloc', stub_alloc), 0x80bfe8b4: ('bzero', stub_bzero),
-         0x80bfe924: ('memcpy', stub_memcpy), 0x80bfe3f4: ('tail', ret0)}
+STUBS = {KLO + 0xd4f4: ('alloc', stub_alloc), KLO + 0xd8b4: ('bzero', stub_bzero),
+         KLO + 0xd924: ('memcpy', stub_memcpy), KLO + 0xd3f4: ('tail', ret0)}
 log = []
 def hook(uc, addr, size, ud):
     h = None
@@ -125,7 +130,7 @@ mu.reg_write(UC_ARM_REG_SP, STK + STKSZ - 0x100)
 mu.reg_write(UC_ARM_REG_LR, END | 1)
 for r, v in ((UC_ARM_REG_R0, rt), (UC_ARM_REG_R1, dev), (UC_ARM_REG_R2, owner), (UC_ARM_REG_R3, params)):
     mu.reg_write(r, v)
-mu.emu_start(0x80bf7aac | 1, END, count=5_000_000)
+mu.emu_start((KLO + 0x6aac) | 1, END, count=5_000_000)
 rv = mu.reg_read(UC_ARM_REG_R0)
 for l in log: print('  ', l)
 print('init ->', rv)
@@ -143,7 +148,7 @@ for i, b in enumerate(bufs):
     out['bufs'].append(dict(gpu=b['gpu'], size=b['size'], opts=b['opts'], file=fn))
 json.dump(out, open('rt_%dx%d.json' % (W, H), 'w'))
 
-# ---- stage 2: the per-submit 3D block builder (0x80bf5eec) on a captured payload ----
+# ---- stage 2: the per-submit 3D block builder (KLO + 0x4eec) on a captured payload ----
 if len(sys.argv) > 5:
     pw = [int(x, 16) for x in open(sys.argv[5]).read().split()]   # payload words w0..
     pay = halloc(0x200)
@@ -160,7 +165,7 @@ if len(sys.argv) > 5:
     mu.reg_write(UC_ARM_REG_LR, END | 1)
     for r, v in ((UC_ARM_REG_R0, ctx), (UC_ARM_REG_R1, pay), (UC_ARM_REG_R2, rt), (UC_ARM_REG_R3, 0)):
         mu.reg_write(r, v)
-    mu.emu_start(0x80bf5eec | 1, END, count=5_000_000)
+    mu.emu_start((KLO + 0x4eec) | 1, END, count=5_000_000)
     for l in log: print('  ', l)
     np_ = [r32(pay + 4 * i) for i in range(len(pw) - 2)]
     print('payload words changed by the kernel:')
