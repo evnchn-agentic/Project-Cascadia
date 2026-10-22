@@ -266,7 +266,8 @@ if grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null && [ -e /sys/class/n
     # it from wlan0 once brcmfmac has made it (~8 s in), else keep the driver's random one.
     ( for _ in $(seq 20); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
       w=$(cat /sys/class/net/wlan0/address 2>/dev/null)
-      [ -n "$w" ] && ip link set eth0 address "${w%:*}:$(printf %02x $(( (0x${w##*:} + 1) & 0xff )))"
+      l=$(echo "${w#*:*:*:}" | tr -d :)
+      [ -n "$w" ] && ip link set eth0 address "${w%:*:*:*}$(n=$(( (0x$l + 1) & 0xffffff )); printf ':%02x:%02x:%02x' $((n >> 16)) $((n >> 8 & 255)) $((n & 255)))"
       ip link set eth0 up && udhcpc -i eth0 -b -q -t 10 >/tmp/udhcpc.log 2>&1 ) &
     msg "J33i: eth0 up, DHCP in the background (/tmp/udhcpc.log)"
 fi
