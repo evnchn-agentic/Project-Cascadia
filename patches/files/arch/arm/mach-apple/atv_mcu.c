@@ -78,8 +78,10 @@ static int mcu_send(struct atv_mcu *m, u8 op, const u8 *body, u8 len)
 	f[6 + len] = c >> 8;
 	f[7 + len] = c & 0xff;
 	m->seq += 2;	/* odd numbers, as iOS uses */
-	ret = serdev_device_write_buf(m->serdev, f, 8 + len);
+	ret = serdev_device_write(m->serdev, f, 8 + len, msecs_to_jiffies(100));
 	mutex_unlock(&m->tx_lock);
+	if (ret >= 0 && ret != 8 + len)
+		ret = -EIO;
 	return ret < 0 ? ret : 0;
 }
 
@@ -108,6 +110,11 @@ static void mcu_release(struct timer_list *t)
 	spin_lock_irqsave(&m->key_lock, flags);
 	mcu_key_up(m);
 	spin_unlock_irqrestore(&m->key_lock, flags);
+}
+
+static void mcu_timer_shutdown(void *t)
+{
+	timer_shutdown_sync(t);
 }
 
 static void mcu_ir(struct atv_mcu *m, const u8 *b, bool repeat)
@@ -235,6 +242,10 @@ static int mcu_probe(struct serdev_device *serdev)
 	spin_lock_init(&m->key_lock);
 	timer_setup(&m->release, mcu_release, 0);
 	serdev_device_set_drvdata(serdev, m);
+	/* before the port opens: an IR frame can arm the timer from then on */
+	ret = devm_add_action_or_reset(dev, mcu_timer_shutdown, &m->release);
+	if (ret)
+		return ret;
 
 	m->input = devm_input_allocate_device(dev);
 	if (!m->input)
@@ -269,13 +280,6 @@ static int mcu_probe(struct serdev_device *serdev)
 	return 0;
 }
 
-static void mcu_remove(struct serdev_device *serdev)
-{
-	struct atv_mcu *m = serdev_device_get_drvdata(serdev);
-
-	timer_shutdown_sync(&m->release);
-}
-
 static const struct of_device_id mcu_of_match[] = {
 	{ .compatible = "apple,j33i-mcu" },
 	{ }
@@ -284,7 +288,6 @@ MODULE_DEVICE_TABLE(of, mcu_of_match);
 
 static struct serdev_device_driver mcu_driver = {
 	.probe = mcu_probe,
-	.remove = mcu_remove,
 	.driver = {
 		.name = "atv-mcu",
 		.of_match_table = mcu_of_match,
