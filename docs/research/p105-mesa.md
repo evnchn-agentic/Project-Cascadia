@@ -3450,6 +3450,27 @@ of 28. piglit's depth and stencil groups 110 -> 174 passes, nothing that
 passed fails; what fails fails for 24-bit depth too (glDrawPixels and
 glCopyPixels of depth: gl_FragDepth; the border colour; depth mipmaps).
 
+**ARB_depth_clamp** is the draw module's, its near and far clipping off.
+The ISP clamps no depth (`gloffset --clamp`), so `render_triangle` cuts a
+triangle where its window z crosses an end of the depth range -- a line
+across it on the screen, window z being linear there -- and draws the
+parts past the ends at the end's depth, a fan each: the clamped depths
+exactly. New vertices' varyings are perspective-correct (1 / w and v / w
+linear on the screen); with flat shading every vertex has the provoking
+one's colours. Without clamping the same keeps depth in 0..1, where the
+draw module's polygon offset may take it past. The draw module's wide
+line and point stages bind a rasterizer state of their own for their
+triangles, depth clipping and clamping both off, so the context keeps the
+program's `depth_clamp` apart (the first try clamped quads but not lines
+and points). piglit's depth_clamp and depth-clamp-range pass; the clip,
+depth range and polygon offset groups, and dEQP's clipping,
+rasterization, polygon_offset, draw and vertex_arrays, as before.
+
+That is the last of the plan's first rows. Left for later from them: the
+GPU's own instancing (iOS has EXT_draw_instanced and EXT_instanced_arrays
+on the A5), RGBA32F targets (no GXM colour format of 128 bits), and the
+gaps below; next is the compiler (M44).
+
 **Gaps the new tests ran into** (they had been skipped): 3D textures --
 GL 1.2's, not there at all (`fbo-incomplete`, `fbo-generatemipmap-3d`);
 the border colour (every `texwrap formats bordercolor`); `gl_FragDepth`
