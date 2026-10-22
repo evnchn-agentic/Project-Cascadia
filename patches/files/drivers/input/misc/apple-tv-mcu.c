@@ -28,22 +28,30 @@ enum { OP_RESET = 0x01, OP_VERSION = 0x02, OP_LED = 0x04, OP_STATE = 0x07,
        OP_IR = 0x10, OP_IR_REPEAT = 0x11, OP_ACK = 0x80, OP_DEBUG = 0xff };
 enum { LED_OFF_MODE, LED_ON_MODE, LED_SLOW_BLINK, LED_FAST_BLINK };
 
+/* Codes as this decode yields them, measured with the aluminium remote (iOS's table writes
+ * the same buttons as 0xe05.., one bit to the left). 0x5xx are the other remote type's, from
+ * iOS's table, not seen here. */
 static const struct { u16 code; u16 key; } atv_keys[] = {
-	{ 0xe05, KEY_UP },    { 0x501, KEY_UP },
-	{ 0xe06, KEY_DOWN },  { 0x502, KEY_DOWN },
-	{ 0xe04, KEY_LEFT },  { 0x503, KEY_LEFT },
-	{ 0xe03, KEY_RIGHT }, { 0x504, KEY_RIGHT },
-	{ 0xe01, KEY_BACK },					/* Menu */
-	{ 0xe2e, KEY_ENTER }, { 0x505, KEY_ENTER },		/* Select */
-	{ 0xe02, KEY_ENTER },					/* white remote's centre */
-	{ 0xe2f, KEY_PLAYPAUSE },
+	{ 0x705, KEY_UP },    { 0x501, KEY_UP },
+	{ 0x706, KEY_DOWN },  { 0x502, KEY_DOWN },
+	{ 0x704, KEY_LEFT },  { 0x503, KEY_LEFT },
+	{ 0x703, KEY_RIGHT }, { 0x504, KEY_RIGHT },
+	{ 0x701, KEY_BACK },					/* Menu */
+	{ 0x72e, KEY_ENTER }, { 0x505, KEY_ENTER },		/* Select */
+	{ 0x702, KEY_ENTER },					/* white remote's centre */
+	{ 0x72f, KEY_PLAYPAUSE },
 };
+/* The aluminium remote follows Select and Play/Pause with the white remote's centre code
+ * ~100 ms later; iOS ignores it from a remote that sent the aluminium code, and so do we. */
+#define ATV_CENTRE	0x702
+#define ATV_ECHO_MS	300
 
 struct atv_mcu {
 	struct serdev_device *serdev;
 	struct input_dev *input;
 	struct led_classdev led;
 	struct timer_list release;
+	unsigned long alu_at;		/* jiffies of the last aluminium Select/Play */
 	spinlock_t key_lock;
 	unsigned int down;		/* key held, 0 if none */
 	struct mutex tx_lock;
@@ -122,6 +130,12 @@ static void mcu_ir(struct atv_mcu *m, const u8 *b, bool repeat)
 	u16 code = (b[0] & 0x1f) << 8 | b[3] >> 1;
 	unsigned int key = 0;
 	unsigned long flags;
+
+	if (code == 0x72e || code == 0x72f)
+		m->alu_at = jiffies;
+	else if (code == ATV_CENTRE && m->alu_at &&
+		 time_before(jiffies, m->alu_at + msecs_to_jiffies(ATV_ECHO_MS)))
+		return;
 
 	for (int i = 0; i < ARRAY_SIZE(atv_keys); i++)
 		if (atv_keys[i].code == code)
