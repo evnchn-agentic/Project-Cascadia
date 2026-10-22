@@ -182,3 +182,8 @@ yuv420p, 30 fps, made on the Mac:
 This is decode only (no colour conversion or display). 480p has headroom for conversion and audio; 720p30 is at
 the limit, so it needs the YUV-to-RGB step on the GPU (mpv `--vo=gpu` on the SGX Mesa) and probably
 `-skip_loop_filter` to play smoothly; 1080p needs the VXD390.
+
+The RAM root is the limit, not the CPU: the image's `/usr` is 325 MB and lives in RAM, 64 MB is CMA, so ~88 MB
+is free. `apk add mpv` wants 140 packages (Alpine's own Mesa pulls llvm22-libs) and was OOM-killed twice, even
+after freeing ~65 MB. A media player (or a browser) needs the root off RAM: NFS root over Ethernet, or a trimmed
+image. Decode alone (above) is not the bottleneck at 480p.
