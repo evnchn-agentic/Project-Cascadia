@@ -118,7 +118,9 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    if (!desc || (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
                  !((usage & ~PIPE_BIND_SAMPLER_VIEW) == 0 &&
                    (format == PIPE_FORMAT_R11G11B10_FLOAT ||
-                    format == PIPE_FORMAT_R9G9B9E5_FLOAT))))
+                    format == PIPE_FORMAT_R9G9B9E5_FLOAT)) &&
+                 !((usage & ~(PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET)) == 0 &&
+                   format == PIPE_FORMAT_R11G11B10_FLOAT)))
       return false;
 
    /* what the pixel back end writes linear (the framebuffer's format) */
@@ -128,7 +130,15 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        * the screen) */
       if (format != PIPE_FORMAT_B8G8R8A8_UNORM && format != PIPE_FORMAT_B8G8R8X8_UNORM &&
           ((usage & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)) ||
-           (format != PIPE_FORMAT_R8_UNORM && format != PIPE_FORMAT_R8G8_UNORM)))
+           (format != PIPE_FORMAT_R8_UNORM && format != PIPE_FORMAT_R8G8_UNORM &&
+            format != PIPE_FORMAT_I8_UNORM && format != PIPE_FORMAT_L8_UNORM &&
+            format != PIPE_FORMAT_L8A8_UNORM && format != PIPE_FORMAT_A8_UNORM &&
+            format != PIPE_FORMAT_R16G16B16A16_FLOAT && format != PIPE_FORMAT_R16G16_FLOAT &&
+            format != PIPE_FORMAT_R16G16B16X16_FLOAT &&
+            format != PIPE_FORMAT_B8G8R8A8_SRGB && format != PIPE_FORMAT_B8G8R8X8_SRGB &&
+            format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_R8G8B8A8_SRGB &&
+            format != PIPE_FORMAT_R16_FLOAT && format != PIPE_FORMAT_R32_FLOAT &&
+            format != PIPE_FORMAT_R32G32_FLOAT && format != PIPE_FORMAT_R11G11B10_FLOAT)))
          return false;
    }
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
@@ -148,6 +158,7 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       case PIPE_FORMAT_L8_UNORM:
       case PIPE_FORMAT_A8_UNORM:
       case PIPE_FORMAT_L8A8_UNORM:
+      case PIPE_FORMAT_I8_UNORM:      /* (M43: U8, RRRR) */
       /* sRGB (EXT_texture_sRGB, GL 2.1): the bytes as they are, decoded
        * by the program (sgx_blend_key's tex_srgb) */
       case PIPE_FORMAT_R8G8B8A8_SRGB:
@@ -276,6 +287,9 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    /* a view's swizzle: the program's, after the lookup (M43:
     * EXT_texture_swizzle; sgx_blend_key's tex_swizzle) */
    caps->texture_swizzle = true;
+   /* (M43) EXT_framebuffer_sRGB: a surface's format says whether the
+    * program encodes (sgx_blend_key's rt_srgb) */
+   caps->dest_surface_srgb_control = true;
    caps->max_texture_2d_size = 4096;      /* iOS's on the A5; SGX_RT_MAX_SIZE */
    caps->max_texture_cube_levels = 12;
    caps->max_texture_3d_levels = 0;

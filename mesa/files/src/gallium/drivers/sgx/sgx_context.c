@@ -307,7 +307,10 @@ sgx_clear_gpu(struct sgx_context *ctx, struct pipe_surface *surf,
 
    const struct sgx_frame_target t = { rt, 0, 0 };
 
+   /* (the frame's own clear packs RGBA8: half floats' targets clear with
+    * a quad, M43) */
    if (!screen->frame || surf->level || surf->first_layer ||
+       sgx_frame_rt_kind(surf->format) != SGX_RT_UNORM8 || util_format_is_srgb(surf->format) ||
        !sgx_frame_can_render(screen->frame, &t))
       return false;
    if (!(done = sgx_fence_create(&screen->dev, false)))

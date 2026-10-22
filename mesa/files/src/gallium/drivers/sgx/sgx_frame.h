@@ -13,6 +13,7 @@
 #ifndef SGX_FRAME_H
 #define SGX_FRAME_H
 
+#include "util/format/u_formats.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -63,6 +64,20 @@ struct sgx_frame_target {
  * B8G8R8X8, up to 4096 x 4096 (M10: the render target data for each size
  * are ours, sgx_rt.c), any level or face of a 2D texture or cube map. */
 bool sgx_frame_can_render(struct sgx_frame *f, const struct sgx_frame_target *t);
+
+
+/* (M43) What a render target's tile holds for each pixel: the program's
+ * colour as RGBA bytes (o0); four half floats (o0, o1: R G, B A); two half
+ * floats (o0: R G); an F32 (o0: R); two F32 (o0, o1: R G) */
+enum sgx_rt_kind { SGX_RT_UNORM8, SGX_RT_F16X4, SGX_RT_F16X2, SGX_RT_F32, SGX_RT_F32X2 };
+enum sgx_rt_kind sgx_frame_rt_kind(enum pipe_format format);
+
+/* whether the tile holds 64 bits a pixel (o0 and o1) */
+static inline bool
+sgx_rt_kind_64(enum sgx_rt_kind k)
+{
+   return k == SGX_RT_F16X4 || k == SGX_RT_F32X2;
+}
 
 /* The whole of rt set to rgba, on the GPU; done is signalled when it is.
  * One render at a time: the caller serialises (sgx_screen.frame_lock). */

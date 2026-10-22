@@ -211,6 +211,9 @@ struct sgx_context {
    struct sgx_pixel_program clear_prog;  /* writes nothing: sgx_zs_clear() */
    struct sgx_pixel_program colour_prog; /* o0 = sa0: sgx_colour_clear() */
    uint64_t colour_code[2];
+   /* (M43) the colour clear's program for each kind of float tile */
+   struct sgx_pixel_program colour_float_prog[SGX_RT_F32X2 + 1];
+   uint64_t colour_float_code[SGX_RT_F32X2 + 1][2];
    struct sgx_batch batch;
    struct sgx_query *query;             /* the active occlusion query (M37) */
    bool queries_off;                    /* (set_active_query_state: meta ops) */

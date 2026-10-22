@@ -450,6 +450,227 @@ target(const char *name, GLenum ifmt, GLenum fmt, int channels, GLuint fbo_back)
 	glDeleteProgram(p);
 }
 
+static float
+to_srgb(float c)
+{
+	c = fminf(fmaxf(c, 0), 1);
+	return c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1 / 2.4f) - 0.055f;
+}
+
+static float
+from_srgb(float c)
+{
+	return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
+/* An sRGB target (GL_SRGB8_ALPHA8, FRAMEBUFFER_SRGB on): cleared, half
+ * drawn a render later, added to (blending in linear: the target decoded,
+ * the sum encoded), read back as its bytes */
+static void
+target_srgb(const char *name)
+{
+	static const char *vs =
+		"#version 120\nattribute vec4 a_position;\n"
+		"void main() { gl_Position = a_position; }\n";
+	static const char *fs =
+		"#version 120\nuniform vec4 colour;\n"
+		"void main() { gl_FragColor = colour; }\n";
+	static const float half_quad[] = { 0, -1, 1, -1, 1, 1, 0, -1, 1, 1, 0, 1 };
+	const float clear[4] = { 0.05f, 0.25f, 0.5f, 1 }, drawn[4] = { 0.6f, 0.02f, 0.3f, 0.5f };
+	const float added[4] = { 0.125f, 0.25f, 0.2f, 0 };
+	char full[64];
+	GLuint tex, fbo, p, back;
+	int bad = 0, at = -1;
+
+	snprintf(full, sizeof(full), "target %s", name);
+	if (only && strncmp(full, only, strlen(only)))
+		return;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, (GLint *)&back);
+	while (glGetError())
+		;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	if (glGetError() || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		printf("%-30s not here\n", full);
+		skipped++;
+		glBindFramebuffer(GL_FRAMEBUFFER, back);
+		return;
+	}
+	glEnable(GL_FRAMEBUFFER_SRGB);
+	p = compile(vs, fs);
+	glUseProgram(p);
+	glClearColor(clear[0], clear[1], clear[2], clear[3]);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glFinish();
+	step("cleared");
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, half_quad);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, drawn);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glFinish();
+	step("half drawn");
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, added);
+	quad();
+	glDisable(GL_BLEND);
+	step("added");
+	glDisable(GL_FRAMEBUFFER_SRGB);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	for (int i = 0; i < W * H; i++) {
+		const float *k = (i % W) < W / 2 ? clear : drawn;
+		int off = 0;
+
+		for (int c = 0; c < 4; c++) {
+			/* (stored encoded and decoded back as 8 bits; alpha linear) */
+			float d = c < 3 ? from_srgb(to8(to_srgb(k[c])) / 255.0f) : to8(k[c]) / 255.0f;
+			float want = c < 3 ? to_srgb(d + added[c]) : fminf(d + added[c], 1);
+
+			off |= abs(px[4 * i + c] - to8(want)) > 3;
+		}
+		if (off && at < 0)
+			at = i;
+		bad += off;
+	}
+	cases++;
+	if (bad) {
+		failed++;
+		printf("%-30s WRONG: %d pixels, the first at %d, %d: %d %d %d %d\n", full, bad, at % W,
+		       at / W, px[4 * at], px[4 * at + 1], px[4 * at + 2], px[4 * at + 3]);
+	} else {
+		printf("%-30s ok\n", full);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, back);
+	glDeleteFramebuffers(1, &fbo);
+	glDeleteTextures(1, &tex);
+	glDeleteProgram(p);
+}
+
+/* GLFMT_DEBUG: a float target's left and right pixel after each step */
+static void
+stepf(const char *what)
+{
+	float l[4], r[4];
+
+	if (!getenv("GLFMT_DEBUG"))
+		return;
+	glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, l);
+	glReadPixels(W - 1, 0, 1, 1, GL_RGBA, GL_FLOAT, r);
+	printf("  %-12s left %g %g %g %g  right %g %g %g %g\n", what, l[0], l[1], l[2], l[3],
+	       r[0], r[1], r[2], r[3]);
+}
+
+/* what a float target of this many channels keeps of v, channel c --
+ * packed: R11G11B10F's, no sign and 6 or 5 bits of mantissa -- as read
+ * back (missing channels 0, alpha 1) */
+static float
+kept_float(int channels, int packed, int c, float v)
+{
+	if (c >= channels)
+		return c == 3 ? 1 : 0;
+	return packed ? fmaxf(v, 0) : v;
+}
+
+/* A render target of floats: what target() does, with values past [0, 1]
+ * -- not clamped -- read back as floats */
+static void
+target_float(const char *name, GLenum ifmt, int channels, int packed)
+{
+	static const char *vs =
+		"#version 120\nattribute vec4 a_position;\n"
+		"void main() { gl_Position = a_position; }\n";
+	static const char *fs =
+		"#version 120\nuniform vec4 colour;\n"
+		"void main() { gl_FragColor = colour; }\n";
+	static const float half_quad[] = { 0, -1, 1, -1, 1, 1, 0, -1, 1, 1, 0, 1 };
+	static float all[W * H * 4];
+	const float clear[4] = { 0.25f, 0.5f, 0.75f, 1 }, drawn[4] = { 2.5f, -1.5f, 0.125f, 0.5f };
+	const float added[4] = { 0.125f, 0.25f, 4, 0 }, scaled[4] = { 0.5f, 3, -2, 1 };
+	char full[64];
+	GLuint tex, fbo, p, back;
+	int bad = 0, at = -1;
+
+	snprintf(full, sizeof(full), "target %s", name);
+	if (only && strncmp(full, only, strlen(only)))
+		return;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, (GLint *)&back);
+	while (glGetError())
+		;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, ifmt, W, H, 0, GL_RGBA, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	if (glGetError() || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		printf("%-30s not here\n", full);
+		skipped++;
+		glBindFramebuffer(GL_FRAMEBUFFER, back);
+		return;
+	}
+	/* (GL clamps fragment colours of fixed point targets only) */
+	glClampColorARB(GL_CLAMP_FRAGMENT_COLOR_ARB, GL_FALSE);
+	glClampColorARB(GL_CLAMP_READ_COLOR_ARB, GL_FALSE);
+	p = compile(vs, fs);
+	glUseProgram(p);
+	glClearColor(clear[0], clear[1], clear[2], clear[3]);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glFinish();
+	stepf("cleared");
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, half_quad);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, drawn);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glFinish();
+	stepf("half drawn");
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, added);
+	quad();
+	glFinish();
+	stepf("added");
+	glBlendFunc(GL_DST_ALPHA, GL_ZERO);
+	glUniform4fv(glGetUniformLocation(p, "colour"), 1, scaled);
+	quad();
+	glDisable(GL_BLEND);
+	stepf("dst alpha");
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_FLOAT, all);
+	for (int i = 0; i < W * H; i++) {
+		const float *k = (i % W) < W / 2 ? clear : drawn;
+		float a = channels == 4 ? k[3] + added[3] : 1;
+		int off = 0;
+
+		for (int c = 0; c < 4; c++) {
+			float want = kept_float(channels, packed, c, scaled[c] * a);
+
+			off |= fabsf(all[4 * i + c] - want) > 0.01f + (packed ? 0.04f : 0.002f) * fabsf(want);
+		}
+		if (off && at < 0)
+			at = i;
+		bad += off;
+	}
+	cases++;
+	if (bad) {
+		failed++;
+		printf("%-30s WRONG: %d pixels, the first at %d, %d: %g %g %g %g\n", full, bad,
+		       at % W, at / W, all[4 * at], all[4 * at + 1], all[4 * at + 2], all[4 * at + 3]);
+	} else {
+		printf("%-30s ok\n", full);
+	}
+	glClampColorARB(GL_CLAMP_FRAGMENT_COLOR_ARB, GL_FIXED_ONLY_ARB);
+	glClampColorARB(GL_CLAMP_READ_COLOR_ARB, GL_FIXED_ONLY_ARB);
+	glBindFramebuffer(GL_FRAMEBUFFER, back);
+	glDeleteFramebuffers(1, &fbo);
+	glDeleteTextures(1, &tex);
+	glDeleteProgram(p);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -519,6 +740,13 @@ main(int argc, char **argv)
 	target("rgba8", GL_RGBA8, GL_RGBA, 4, fbo);
 	target("r8", GL_R8, GL_RED, 1, fbo);
 	target("rg8", GL_RG8, GL_RG, 2, fbo);
+	target_srgb("srgb8-alpha8");
+	target_float("rgba16f", GL_RGBA16F_ARB, 4, 0);
+	target_float("rg16f", GL_RG16F, 2, 0);
+	target_float("r16f", GL_R16F, 1, 0);
+	target_float("r32f", GL_R32F, 1, 0);
+	target_float("rg32f", GL_RG32F, 2, 0);
+	target_float("r11g11b10f", GL_R11F_G11F_B10F_EXT, 3, 1);
 	printf("%d of %d cases right (%d formats not here)\n", cases - failed, cases, skipped);
 	return failed ? 1 : 0;
 }

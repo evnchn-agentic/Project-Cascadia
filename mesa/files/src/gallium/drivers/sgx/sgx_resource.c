@@ -300,6 +300,7 @@ native_format(const struct pipe_resource *p, uint32_t *fmt, uint32_t *swizzle)
    case PIPE_FORMAT_B5G5R5A1_UNORM: *fmt = 0x04; *swizzle = 1; return 2;  /* ARGB */
    case PIPE_FORMAT_L8_UNORM:       *fmt = 0x00; *swizzle = 5; return 1;  /* 1RRR: iOS's L8 */
    case PIPE_FORMAT_A8_UNORM:       *fmt = 0x00; *swizzle = 6; return 1;  /* R000: A8 */
+   case PIPE_FORMAT_I8_UNORM:       *fmt = 0x00; *swizzle = 3; return 1;  /* RRRR: I8 (M43) */
    case PIPE_FORMAT_L8A8_UNORM:     *fmt = 0x07; *swizzle = 2; return 2;  /* GRRR: LA8 */
    default:                         return 0;
    }

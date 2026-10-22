@@ -30,6 +30,8 @@
 #include "draw/draw_vertex.h"
 #include "tgsi/tgsi_from_mesa.h"
 #include "util/format/u_format.h"
+#include "util/format_srgb.h"
+#include "util/half_float.h"
 #include "util/log.h"
 #include "util/os_time.h"
 #include "util/u_debug.h"
@@ -666,12 +668,19 @@ fs_for_draw(struct sgx_context *ctx)
          key.tex_swizzle[unit][3] = view->swizzle_a;
       }
    }
+   /* (M43) what the target's tile holds */
+   if (ctx->fb.nr_cbufs && ctx->fb.cbufs[0].texture) {
+      key.rt_kind = sgx_frame_rt_kind(ctx->fb.cbufs[0].format);
+      key.rt_srgb = util_format_is_srgb(ctx->fb.cbufs[0].format);
+      key.rt_intensity = util_format_is_intensity(ctx->fb.cbufs[0].format);
+   }
    /* gl_FrontFacing: which winding is the front */
    if (ctx->rast && ctx->rast->front_ccw &&
        BITSET_TEST(sh->nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE))
       key.front_ccw = 1;
    if (!key.enable && key.colormask == 0xf && !key.tex_swap && !key.tex_x8 && !key.tex_srgb &&
-       !key.front_ccw && !key.logicop && !key.tex_depth && !key.tex_swz && !key.tex_f16)
+       !key.front_ccw && !key.logicop && !key.tex_depth && !key.tex_swz && !key.tex_f16 &&
+       !key.rt_kind && !key.rt_srgb && !key.rt_intensity)
       return sh->compiled;
    /* (the key is bytes, no padding) */
    for (unsigned i = 0; i < sh->nvariants; i++)
@@ -1980,8 +1989,36 @@ sgx_colour_clear(struct sgx_context *ctx, const union pipe_color_union *color,
       ctx->colour_prog.nvaryings = 1;
       ctx->colour_prog.nsa = 1;
    }
+   /* (M43) a target of floats: the colour's four F32 from sa, packed as
+    * the tile holds it by one instruction (two moves of raw words, o0 then
+    * o1, left o1 unwritten): a program for each kind of tile */
+   if (ctx->fb.nr_cbufs && ctx->fb.cbufs[0].texture &&
+       sgx_frame_rt_kind(ctx->fb.cbufs[0].format) != SGX_RT_UNORM8) {
+      enum sgx_rt_kind k = sgx_frame_rt_kind(ctx->fb.cbufs[0].format);
+      struct sgx_pixel_program *prog = &ctx->colour_float_prog[k];
+      uint64_t *code = ctx->colour_float_code[k];
+      struct usse_reg o0 = usse_reg(USSE_OUTPUT, 0), sa0 = usse_reg(USSE_SA, 0);
+
+      if (!prog->code) {
+         code[0] = USSE_PHAS;
+         code[1] = (k == SGX_RT_F16X4 ? usse_pack_f16(o0, sa0, 0xf) :
+                    k == SGX_RT_F16X2 ? usse_pack_f16(o0, sa0, 0x3) :
+                    k == SGX_RT_F32X2 ? usse_pack_f32x2(o0, sa0) :
+                                        usse_vbw_or(o0, sa0, 0)) | USSE_END;
+         prog->code = code;
+         prog->ncode = 2;
+         prog->ninputs = 1;
+         prog->nvaryings = 1;
+         prog->nsa = 4;
+      }
+      return quad(ctx, sc, 0.5f, &st, prog, (const uint32_t *)color->f, 4, true);
+   }
+   /* (an sRGB target's colour encoded, M43: what GL's clear writes there) */
    for (unsigned i = 0; i < 4; i++)
-      packed |= (uint32_t)float_to_ubyte(color->f[i]) << 8 * i;
+      packed |= (uint32_t)(i < 3 && ctx->fb.nr_cbufs && ctx->fb.cbufs[0].texture &&
+                                 util_format_is_srgb(ctx->fb.cbufs[0].format) ?
+                           util_format_linear_float_to_srgb_8unorm(color->f[i]) :
+                           float_to_ubyte(color->f[i])) << 8 * i;
    return quad(ctx, sc, 0.5f, &st, &ctx->colour_prog, &packed, 1, true);
 }
 

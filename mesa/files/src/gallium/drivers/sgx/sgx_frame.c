@@ -57,6 +57,7 @@
 #include "sgx_resource.h"
 #include "sgx_rt.h"
 #include "sgx_template.h"
+#include "sgx_usse.h"
 
 /* the EXT window, as sgx2d uses it */
 #define EXT_TEX_END     0x280000
@@ -72,7 +73,13 @@
 #define ITER_PROG       0x20
 #define ITER_PROG_F32   0x30
 #define VERTEX_PROGS    0x40
-#define PROGS_SIZE      0x1e0
+/* (M43) the background's program for targets of four half floats:
+ * iOS's m28 pixel program, the texel's four F16 from pa0 into o0, o1 */
+#define BG64_PROG       0x1e0
+/* and of two F32: both registers moved by one VPCK F32 (an F16 move might
+ * not keep F32's bits) */
+#define BG64F32_PROG    0x1f0
+#define PROGS_SIZE      0x200
 #define EOT_SLOT        0x58
 #define MAX_EOT         256
 #define CODE_BO_SIZE    (PROGS_SIZE + MAX_EOT * EOT_SLOT)
@@ -352,6 +359,7 @@ struct sgx_eot {
    /* (M43) its format: the pixel back end's word, a pixel's bytes, and the
     * background object's load of it as a texture's format and swizzle */
    uint32_t pbe, bytes, bg_fmt, bg_swizzle;
+   enum sgx_rt_kind kind;
 };
 
 /* The render target formats (M43).  The pixel back end's format words are
@@ -374,11 +382,46 @@ rt_format(enum pipe_format format, struct sgx_eot *to)
       enum pipe_format format;
       const char *name;
       uint32_t pbe, bytes, bg_fmt, bg_swizzle;
+      enum sgx_rt_kind kind;
    } fmts[] = {
-      { PIPE_FORMAT_B8G8R8A8_UNORM, "BGRA8", 0x00110000, 4, 0x0c, 1 },
-      { PIPE_FORMAT_B8G8R8X8_UNORM, "BGRX8", 0x00110000, 4, 0x0c, 1 },
-      { PIPE_FORMAT_R8_UNORM, "R8", 0x80810000, 1, 0x00, 5 },     /* U8, R; L8's 1RRR */
-      { PIPE_FORMAT_R8G8_UNORM, "RG8", 0xb0810000, 2, 0x07, 0 },  /* U8U8, GR */
+      { PIPE_FORMAT_B8G8R8A8_UNORM, "BGRA8", 0x00110000, 4, 0x0c, 1, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_B8G8R8X8_UNORM, "BGRX8", 0x00110000, 4, 0x0c, 1, SGX_RT_UNORM8 },
+      /* (M43) sRGB: the same bytes, the program encodes them (and decodes
+       * the tile's for blending: sgx_blend_key's rt_srgb); and R G B A in
+       * memory, GXM's ABGR */
+      { PIPE_FORMAT_B8G8R8A8_SRGB, "BGRA8S", 0x00110000, 4, 0x0c, 1, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_B8G8R8X8_SRGB, "BGRX8S", 0x00110000, 4, 0x0c, 1, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_R8G8B8A8_UNORM, "RGBA8", 0x00010000, 4, 0x0c, 0, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_R8G8B8A8_SRGB, "RGBA8S", 0x00010000, 4, 0x0c, 0, SGX_RT_UNORM8 },
+      /* U8, R; L8's 1RRR */
+      { PIPE_FORMAT_R8_UNORM, "R8", 0x80810000, 1, 0x00, 5, SGX_RT_UNORM8 },
+      /* U8U8, GR */
+      { PIPE_FORMAT_R8G8_UNORM, "RG8", 0xb0810000, 2, 0x07, 0, SGX_RT_UNORM8 },
+      /* GL's intensity, luminance, luminance alpha and alpha targets (M43:
+       * Mesa's RGBA stand-in for them blends with the alpha drawn, not the
+       * intensity's or 1): loaded RRRR, 1RRR, GRRR (the sampler's
+       * swizzles, 3 found from L8's 5 and A8's 6), R000; LA8 written R
+       * then A (GXM's U8U8 AR), A8 its A (U8, swizzle 1) */
+      { PIPE_FORMAT_I8_UNORM, "I8", 0x80810000, 1, 0x00, 3, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_L8_UNORM, "L8", 0x80810000, 1, 0x00, 5, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_L8A8_UNORM, "LA8", 0xb0b10000, 2, 0x07, 2, SGX_RT_UNORM8 },
+      { PIPE_FORMAT_A8_UNORM, "A8", 0x80910000, 1, 0x00, 6, SGX_RT_UNORM8 },
+      /* F16F16F16F16 (iOS's m28 word less the tiled bit), loaded as the
+       * texture F16F16F16F16 handed back as F16 */
+      { PIPE_FORMAT_R16G16B16A16_FLOAT, "RGBA16F", 0x01010000, 8, 0x1b, 0, SGX_RT_F16X4 },
+      /* (GL's RGB16F: no alpha, so blending takes the target's as 1) */
+      { PIPE_FORMAT_R16G16B16X16_FLOAT, "RGBX16F", 0x01010000, 8, 0x1b, 0, SGX_RT_F16X4 },
+      /* F16F16 and F16, loaded raw (the tile's own bits) */
+      { PIPE_FORMAT_R16G16_FLOAT, "RG16F", 0x00810000, 4, 0x11, 0, SGX_RT_F16X2 },
+      { PIPE_FORMAT_R16_FLOAT, "R16F", 0xf0010000, 2, 0x0b, 0, SGX_RT_F16X2 },
+      /* F32, raw both ways; F32F32, two registers */
+      { PIPE_FORMAT_R32_FLOAT, "R32F", 0x10810000, 4, 0x12, 0, SGX_RT_F32 },
+      { PIPE_FORMAT_R32G32_FLOAT, "RG32F", 0x11010000, 8, 0x1e, 0, SGX_RT_F32X2 },
+      /* F11F11F10 (APPLE_color_buffer_packed_float): the PBE packs the
+       * tile's four F16 with bit 25 (iOS's m28 had it too; without it the
+       * PBE wrote o0's bits as they are -- for F16F16F16F16 either way);
+       * loaded as the texture handed back as F16 */
+      { PIPE_FORMAT_R11G11B10_FLOAT, "R11G11B10F", 0x23010000, 4, 0x1a, 0, SGX_RT_F16X4 },
    };
 
    for (unsigned i = 0; i < ARRAY_SIZE(fmts); i++) {
@@ -391,6 +434,7 @@ rt_format(enum pipe_format format, struct sgx_eot *to)
       to->bytes = fmts[i].bytes;
       to->bg_fmt = fmts[i].bg_fmt;
       to->bg_swizzle = fmts[i].bg_swizzle;
+      to->kind = fmts[i].kind;
       snprintf(name, sizeof(name), "SGX_PBE_%s", fmts[i].name);
       if ((e = getenv(name)))
          to->pbe = strtoul(e, NULL, 0);
@@ -1137,6 +1181,16 @@ put_ours(struct sgx_frame *f)
    memcpy(f->code_map, replace, sizeof(replace));
    memcpy(f->code_map + ITER_PROG, iterated, sizeof(iterated));
    memcpy(f->code_map + ITER_PROG_F32, iterated_f32, sizeof(iterated_f32));
+   {
+      /* PHAS; mov.f16 o0.xyzw, pa0.xyzw, end (iOS's m28) */
+      const uint64_t bg64[2] = { USSE_PHAS, 0x3884042185000000ull };
+      const uint64_t bg64f32[2] = {
+         USSE_PHAS, usse_pack_f32x2(usse_reg(USSE_OUTPUT, 0), usse_reg(USSE_PA, 0)) | USSE_END,
+      };
+
+      memcpy(f->code_map + BG64_PROG, bg64, sizeof(bg64));
+      memcpy(f->code_map + BG64F32_PROG, bg64f32, sizeof(bg64f32));
+   }
    for (unsigned n = 0; n <= SGX_FRAME_MAX_VARYINGS; n++) {
       uint64_t prog[8];
       unsigned len = vertex_program(prog, n);
@@ -1316,6 +1370,14 @@ sgx_frame_destroy(struct sgx_frame *f)
 }
 
 /* where a target's pixels are: its level's and layer's */
+enum sgx_rt_kind
+sgx_frame_rt_kind(enum pipe_format format)
+{
+   struct sgx_eot to = { 0 };
+
+   return rt_format(format, &to) ? to.kind : SGX_RT_UNORM8;
+}
+
 static struct sgx_eot
 target_eot(const struct sgx_frame_target *t)
 {
@@ -1332,6 +1394,8 @@ target_eot(const struct sgx_frame_target *t)
    return to;
 }
 
+static bool own_copies(const struct sgx_frame *f);
+
 bool
 sgx_frame_can_render(struct sgx_frame *f, const struct sgx_frame_target *t)
 {
@@ -1342,6 +1406,10 @@ sgx_frame_can_render(struct sgx_frame *f, const struct sgx_frame_target *t)
        (p->target != PIPE_TEXTURE_2D && p->target != PIPE_TEXTURE_CUBE &&
         p->target != PIPE_TEXTURE_RECT && p->target != PIPE_TEXTURE_1D) ||
        !rt_format(p->format, &(struct sgx_eot){ 0 }) || p->nr_samples > 1)
+      return false;
+   /* (the background of half floats is patched into a render's own copy
+    * of the PDS block) */
+   if (sgx_frame_rt_kind(p->format) != SGX_RT_UNORM8 && !own_copies(f))
       return false;
    to = target_eot(t);
    return to.w <= SGX_RT_MAX_SIZE && to.h <= SGX_RT_MAX_SIZE &&
@@ -1545,6 +1613,11 @@ kick(struct sgx_frame *f, const struct sgx_frame_target *t, float depth,
    {
       uint32_t *b = (uint32_t *)(blk - 0x80), base = zls ? zls->bo->va & ~0xfffffu : 0;
 
+      /* (M43) a target of half floats: two output registers a pixel -- the
+       * one word of the 3D block iOS's kext sets apart for m28's target
+       * (its builder 0x80bf5eec run on m25's and m28's payloads, rtemu.py:
+       * payload word 34) */
+      b[0x4c / 4] = sgx_rt_kind_64(sgx_frame_rt_kind(t->res->base.format));
       b[0x14 / 4] = base;
       b[0x6c / 4] = zls ? zls_ctl(zls) : 0;
       b[0x70 / 4] = zls ? zls->bo->va - base : 0;
@@ -2017,6 +2090,10 @@ begin_render(struct sgx_frame *f, const struct sgx_frame_target *t, struct sgx_e
    eot = eot_program(f, &to);
    bg[0] = (to.stride / 4 / 4 - 2) << 16 | 0x0e90;
    bg[1] = 0xc0000000 | to.bg_fmt << 24 | (to.w - 1) << 12 | (to.h - 1);
+   /* (M43) four half floats: handed back as F16, two registers (R11G11B10F
+    * too: the tile's F16) */
+   if (to.kind == SGX_RT_F16X4)
+      bg[3] |= 0x80000000u;
    bg[2] = to.va;
    bg[3] = to.bg_swizzle << 28;
    d0 = doutu(f, eot);
@@ -2032,6 +2109,18 @@ begin_render(struct sgx_frame *f, const struct sgx_frame_target *t, struct sgx_e
       memcpy(p, pds, SGX_TMPL_PDS_SIZE);
       p[8 / 4] = d0;
       memcpy(p + 0x130 / 4, bg, 4 * sizeof(uint32_t));
+      /* (M43) the background of four half floats: its texel into two
+       * registers (iOS's F16 lookups: iterate size 0x52, texture DOUT kind
+       * 0x024) and our program moving both into o0, o1 */
+      if (to.kind == SGX_RT_F16X4) {
+         p[0x120 / 4] = doutu(f, f->code_va + BG64_PROG);
+         p[0x144 / 4] = (p[0x144 / 4] & ~0xffu) | 0x52;
+         p[0x148 / 4] = (p[0x148 / 4] & ~0xfffu) | 0x024;
+      } else if (to.kind == SGX_RT_F32X2) {
+         /* (two F32 raw: two registers, iterate size 0x12) */
+         p[0x120 / 4] = doutu(f, f->code_va + BG64F32_PROG);
+         p[0x144 / 4] = (p[0x144 / 4] & ~0xffu) | 0x12;
+      }
       memcpy(t, term, 0x60);
       t[0x10 / 4] = tiles;
    } else {
@@ -2543,9 +2632,10 @@ sgx_frame_render(struct sgx_frame *f, const struct sgx_frame_target *t,
    }
 
    if (f->debug)
-      mesa_logi("sgx: a render of %u draws, %u vertices, into %ux%u at 0x%08x (end of tile "
-                "0x%08x), its own memory %u chunks%s", n, total, to.w, to.h, to.va, eot,
-                f->arena.n, o ? "" : " (the frame's words: after the last render)");
+      mesa_logi("sgx: a render of %u draws, %u vertices, into %ux%u %s at 0x%08x (end of tile "
+                "0x%08x, PBE 0x%08x), its own memory %u chunks%s", n, total, to.w, to.h,
+                util_format_short_name(t->res->base.format), to.va, eot, to.pbe, f->arena.n,
+                o ? "" : " (the frame's words: after the last render)");
    ret = kick(f, t, depth_clear, zls, vis, handles, nhandles, vdm, o, done);
    if (!ret) {
       sgx_fence_reference(&f->queued[f->nqueued++ % MAX_QUEUED], done);

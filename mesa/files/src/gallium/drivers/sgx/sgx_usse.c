@@ -8,6 +8,8 @@
  */
 #include "sgx_usse.h"
 
+#include <stdlib.h>
+
 #include <assert.h>
 #include <stdio.h>
 
@@ -233,6 +235,76 @@ usse_pack_unorm8_to(struct usse_reg dest, struct usse_reg src)
           bits(dbank, 33, 32) | bits(bank, 31, 30) | bits(bank, 29, 28) | bits(dest.num, 27, 21) |
           bits(3, 20, 19) | bits(1, 18, 18) | bits(1, 17, 16) | bits(2, 15, 14) |
           bits(src.num >> 1, 13, 8) | bits(0, 7, 7) | bits((src.num >> 1) + 1, 6, 1);
+}
+
+/* SGX_USSE_XOR_PACKF16 / _UNPACKF16=mask: bits flipped in those words (to
+ * find their encoding) */
+static uint64_t
+usse_xor(const char *name)
+{
+   const char *e = getenv(name);
+
+   return e ? strtoull(e, NULL, 0) : 0;
+}
+
+/* VPCK F32 to F16 (M43): usse_pack_unorm8_to's word with dest format 5
+ * (F16) and no scale -- F16 from src's pair and src + 2's, as mask says */
+static uint64_t
+vpck_f32_to(unsigned fmt, struct usse_reg dest, struct usse_reg src, unsigned mask)
+{
+   unsigned ext, bank, dext, dbank;
+
+   assert(!(src.num & 1));
+   src_bank(src, &ext, &bank);
+   dest_bank(dest, &dext, &dbank);
+   return bits(0x08, 63, 59) | SKIPINV | bits(dext, 51, 51) | bits(ext, 49, 49) |
+          bits(ext, 48, 48) | bits(6, 43, 41) | bits(fmt, 40, 38) | bits(mask, 37, 34) |
+          bits(dbank, 33, 32) | bits(bank, 31, 30) | bits(bank, 29, 28) |
+          bits(dest.num, 27, 21) | bits(3, 20, 19) | bits(1, 17, 16) | bits(2, 15, 14) |
+          bits(src.num >> 1, 13, 8) | bits(0, 7, 7) | bits((src.num >> 1) + 1, 6, 1);
+}
+
+uint64_t
+usse_pack_f32x2(struct usse_reg dest, struct usse_reg src)
+{
+   return vpck_f32_to(6, dest, src, 0x3) ^ usse_xor("SGX_USSE_XOR_PACKF32");
+}
+
+uint64_t
+usse_pack_f16(struct usse_reg dest, struct usse_reg src, unsigned mask)
+{
+   unsigned ext, bank, dext, dbank;
+
+   assert(!(src.num & 1));
+   src_bank(src, &ext, &bank);
+   dest_bank(dest, &dext, &dbank);
+   return (bits(0x08, 63, 59) | SKIPINV | bits(dext, 51, 51) | bits(ext, 49, 49) |
+           bits(ext, 48, 48) | bits(6, 43, 41) | bits(5, 40, 38) | bits(mask, 37, 34) |
+           bits(dbank, 33, 32) | bits(bank, 31, 30) | bits(bank, 29, 28) |
+           bits(dest.num, 27, 21) | bits(3, 20, 19) | bits(1, 17, 16) | bits(2, 15, 14) |
+           bits(src.num >> 1, 13, 8) | bits(0, 7, 7) | bits((src.num >> 1) + 1, 6, 1)) ^
+          usse_xor("SGX_USSE_XOR_PACKF16");
+}
+
+/* VPCK F16 to F32 (M43): usse_unpack_unorm8's word with source format 5
+ * (F16) and no scale -- channels chan, chan + 1 of the pair src: as for
+ * bytes, the select's low bit at 0, its high bit the second source's low
+ * bit (o1's halves are channels 2 and 3 of o0's pair, not o1's 0 and 1:
+ * glfmt's blend read o0 twice that way) */
+uint64_t
+usse_unpack_f16(struct usse_reg dest, struct usse_reg src, unsigned chan)
+{
+   unsigned dext, dbank, ext, bank;
+
+   assert(!(dest.num & 1) && !(src.num & 1) && (chan == 0 || chan == 2));
+   dest_bank(dest, &dext, &dbank);
+   src_bank(src, &ext, &bank);
+   return (bits(0x08, 63, 59) | SKIPINV | bits(dext, 51, 51) | bits(ext, 49, 49) |
+           bits(1, 48, 48) | bits(5, 43, 41) | bits(6, 40, 38) | bits(3, 37, 34) |
+           bits(dbank, 33, 32) | bits(bank, 31, 30) | bits(2, 29, 28) | bits(dest.num, 27, 21) |
+           bits(3, 20, 19) | bits(chan + 1, 17, 16) | bits(2, 15, 14) |
+           bits(src.num >> 1, 13, 8) | bits(chan >> 1, 6, 1)) ^
+          usse_xor("SGX_USSE_XOR_UNPACKF16");
 }
 
 /* VPCK from four F16 in a register pair (M38: iOS's `pck.u8.f16 o0.xyzw,

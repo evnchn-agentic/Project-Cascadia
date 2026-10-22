@@ -51,6 +51,11 @@ struct sgx_blend_key {
    /* (M43) the units whose copy is half floats (sgx_resource_copy_f16):
     * sampled as F32, not as bytes; not by the PDS */
    uint8_t tex_f16;
+   /* (M43) what the target's tile holds (enum sgx_rt_kind: RGBA bytes,
+    * half floats, F32): the colour packed so, the tile read back so */
+   uint8_t rt_kind;
+   uint8_t rt_srgb;        /* (M43) the target's bytes sRGB: encoded, decoded to blend */
+   uint8_t rt_intensity;   /* (M43) an intensity target: the colour R R R R in the tile */
 };
 
 #define SGX_FS_MAX_SAMPLERS 8

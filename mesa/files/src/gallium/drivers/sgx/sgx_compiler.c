@@ -38,6 +38,7 @@
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_format_convert.h"
 #include "compiler/nir/nir_lower_blend.h"
 #include "util/format/u_formats.h"
 #include "util/ralloc.h"
@@ -1218,6 +1219,8 @@ memory_uniform(struct comp *c, nir_intrinsic_instr *in, unsigned at, bool indexe
    }
 }
 
+static void tile_read(struct comp *c, unsigned d);
+
 static void
 intrinsic(struct comp *c, nir_intrinsic_instr *in)
 {
@@ -1463,8 +1466,12 @@ intrinsic(struct comp *c, nir_intrinsic_instr *in)
             src = treg(c, k);
             emit(c, usse_limm(src, strtoul(dbg, NULL, 0)));
          }
-         emit(c, usse_unpack_unorm8(treg(c, d), src, 0));
-         emit(c, usse_unpack_unorm8(treg(c, d + 2), src, 2));
+         if (c->fs->blend.rt_kind != SGX_RT_UNORM8 && !dbg) {
+            tile_read(c, d);
+         } else {
+            emit(c, usse_unpack_unorm8(treg(c, d), src, 0));
+            emit(c, usse_unpack_unorm8(treg(c, d + 2), src, 2));
+         }
          for (unsigned i = 0; i < 4; i++) {
             c->loc[id + i] = treg(c, d + i);
             c->owned[id + i] = i < in->def.num_components && c->last_use[id + i] >= 0;
@@ -1724,6 +1731,35 @@ logic_output(struct comp *c, unsigned base)
 }
 
 /* the colour: four registers in a row, packed into o0 */
+/* (M43) the colour the tile holds, R G B A as F32 into d..d + 3 (d even),
+ * for a target not of RGBA bytes: half floats (o0, o1 or o0 alone), F32
+ * (o0, o1 or o0 alone); the channels it has not 0, alpha 1 */
+static void
+tile_read(struct comp *c, unsigned d)
+{
+   struct usse_reg o0 = usse_reg(USSE_OUTPUT, 0);
+
+   switch (c->fs->blend.rt_kind) {
+   case SGX_RT_F16X4:
+      emit(c, usse_unpack_f16(treg(c, d), o0, 0));
+      emit(c, usse_unpack_f16(treg(c, d + 2), o0, 2));
+      return;
+   case SGX_RT_F16X2:
+      emit(c, usse_unpack_f16(treg(c, d), o0, 0));
+      break;
+   case SGX_RT_F32:
+      emit(c, usse_fmov(treg(c, d), o0));
+      emit(c, usse_limm(treg(c, d + 1), 0));
+      break;
+   default:
+      emit(c, usse_fmov(treg(c, d), o0));
+      emit(c, usse_fmov(treg(c, d + 1), usse_reg(USSE_OUTPUT, 1)));
+      break;
+   }
+   emit(c, usse_limm(treg(c, d + 2), 0));
+   emit(c, usse_limm(treg(c, d + 3), 0x3f800000));
+}
+
 static void
 output(struct comp *c)
 {
@@ -1764,8 +1800,12 @@ output(struct comp *c)
       unsigned d = block(c, 4, 2);
 
       emit(c, usse_fmov(treg(c, c->kill + 1), treg(c, c->kill)));
-      emit(c, usse_unpack_unorm8(treg(c, d), usse_reg(USSE_OUTPUT, 0), 0));
-      emit(c, usse_unpack_unorm8(treg(c, d + 2), usse_reg(USSE_OUTPUT, 0), 2));
+      if (c->fs->blend.rt_kind != SGX_RT_UNORM8) {
+         tile_read(c, d);
+      } else {
+         emit(c, usse_unpack_unorm8(treg(c, d), usse_reg(USSE_OUTPUT, 0), 0));
+         emit(c, usse_unpack_unorm8(treg(c, d + 2), usse_reg(USSE_OUTPUT, 0), 2));
+      }
       for (unsigned i = 0; i < 4; i++) {
          uint64_t w;
 
@@ -1782,7 +1822,22 @@ output(struct comp *c)
                         &c->sop2_factors) | USSE_END);
       return;
    }
-   emit(c, usse_pack_unorm8(0, treg(c, base)) | USSE_END);
+   switch (c->fs->blend.rt_kind) {
+   case SGX_RT_F16X4:
+      emit(c, usse_pack_f16(usse_reg(USSE_OUTPUT, 0), treg(c, base), 0xf) | USSE_END);
+      break;
+   case SGX_RT_F16X2:
+      emit(c, usse_pack_f16(usse_reg(USSE_OUTPUT, 0), treg(c, base), 0x3) | USSE_END);
+      break;
+   case SGX_RT_F32:
+      emit(c, usse_fmov(usse_reg(USSE_OUTPUT, 0), treg(c, base)) | USSE_END);
+      break;
+   case SGX_RT_F32X2:
+      emit(c, usse_pack_f32x2(usse_reg(USSE_OUTPUT, 0), treg(c, base)) | USSE_END);
+      break;
+   default:
+      emit(c, usse_pack_unorm8(0, treg(c, base)) | USSE_END);
+   }
 }
 
 /* A blend factor as SOP2 takes it, the source being SOP2's first operand
@@ -1917,12 +1972,78 @@ optimize(nir_shader *s)
 
 /* GL's blending (and colour mask) for render target 0 into the shader:
  * NIR's own lowering, which reads the destination with load_output */
+/* (M43) the colour to an intensity target: R into all four channels */
+static bool
+lower_intensity_target(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   nir_io_semantics sem;
+   nir_def *v;
+
+   if (in->intrinsic != nir_intrinsic_store_output)
+      return false;
+   sem = nir_intrinsic_io_semantics(in);
+   if ((sem.location != FRAG_RESULT_COLOR && sem.location != FRAG_RESULT_DATA0) ||
+       sem.dual_source_blend_index || nir_intrinsic_component(in))
+      return false;
+   v = in->src[0].ssa;
+   b->cursor = nir_before_instr(&in->instr);
+   nir_src_rewrite(&in->src[0], nir_replicate(b, nir_channel(b, v, 0), 4));
+   nir_intrinsic_set_write_mask(in, 0xf);
+   return true;
+}
+
+/* (M43) the colour to an sRGB target: its RGB encoded on the way out (a
+ * store of the colour), decoded on the way in (blending's fetch of it) */
+static bool
+lower_srgb_target(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   nir_io_semantics sem;
+
+   if (in->intrinsic != nir_intrinsic_store_output && in->intrinsic != nir_intrinsic_load_output)
+      return false;
+   sem = nir_intrinsic_io_semantics(in);
+   if (sem.location != FRAG_RESULT_COLOR && sem.location != FRAG_RESULT_DATA0)
+      return false;
+   if (in->intrinsic == nir_intrinsic_store_output) {
+      nir_def *v = in->src[0].ssa;
+
+      if (v->num_components < 3)
+         return false;
+      b->cursor = nir_before_instr(&in->instr);
+      nir_def *rgb = nir_format_linear_to_srgb(b, nir_channels(b, v, 0x7));
+      nir_def *out = v->num_components == 4 ?
+                     nir_vec4(b, nir_channel(b, rgb, 0), nir_channel(b, rgb, 1),
+                              nir_channel(b, rgb, 2), nir_channel(b, v, 3)) : rgb;
+
+      nir_src_rewrite(&in->src[0], out);
+      return true;
+   }
+   if (!sem.fb_fetch_output || in->def.num_components < 3)
+      return false;
+   b->cursor = nir_after_instr(&in->instr);
+   {
+      nir_def *v = &in->def;
+      nir_def *rgb = nir_format_srgb_to_linear(b, nir_channels(b, v, 0x7));
+      nir_def *lin = v->num_components == 4 ?
+                     nir_vec4(b, nir_channel(b, rgb, 0), nir_channel(b, rgb, 1),
+                              nir_channel(b, rgb, 2), nir_channel(b, v, 3)) : rgb;
+
+      nir_def_rewrite_uses_after(v, lin);
+   }
+   return true;
+}
+
 static void
 lower_blend(nir_shader *s, const struct sgx_blend_key *k)
 {
    nir_lower_blend_options o = { .scalar_blend_const = true };
 
-   o.rt[0].format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   /* (floats: not clamped, M43) */
+   o.rt[0].format = k->rt_kind == SGX_RT_F16X4 ? PIPE_FORMAT_R16G16B16A16_FLOAT :
+                    k->rt_kind == SGX_RT_F16X2 ? PIPE_FORMAT_R16G16_FLOAT :
+                    k->rt_kind == SGX_RT_F32 ? PIPE_FORMAT_R32_FLOAT :
+                    k->rt_kind == SGX_RT_F32X2 ? PIPE_FORMAT_R32G32_FLOAT :
+                    k->rt_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_B8G8R8A8_UNORM;
    o.rt[0].colormask = k->colormask;
    if (k->enable) {
       o.rt[0].rgb.func = k->rgb_func;
@@ -2422,6 +2543,8 @@ f16_colour(struct comp *c, nir_function_impl *impl)
    struct usse_reg o0 = usse_reg(USSE_OUTPUT, 0), colour;
 
    if (getenv("SGX_NO_F16") || c->vs || c->kills || c->ncolours || c->logicop >= 0 ||
+       c->fs->blend.rt_kind != SGX_RT_UNORM8 || c->fs->blend.rt_srgb ||
+       c->fs->blend.rt_intensity ||
        c->nuniforms || exec_list_length(&impl->body) != 1)
       return false;
    nir_foreach_block(block, impl) {
@@ -2658,7 +2781,8 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
            unsigned why_size, bool keep_order)
 {
    struct comp c = { .keep_order = keep_order };
-   bool blending = blend && (blend->enable || blend->colormask != 0xf);
+   bool blending = blend && (blend->enable || blend->colormask != 0xf || blend->rt_srgb ||
+                             blend->rt_intensity);
    nir_shader *s;
    unsigned out_at;
 
@@ -2682,15 +2806,16 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
       c.fs->blend.colormask = 0xf;
    /* (discard keeps the tile's colour as the colour: blended again, not
     * kept, M19) */
-   if (blending && !fs->info.fs.uses_discard && !blend->logicop && !getenv("SGX_NO_SOP2") &&
-       sop2_blend(blend, &c.sop2_factors, &c.sop2_swap)) {
+   if (blending && !fs->info.fs.uses_discard && !blend->logicop &&
+       blend->rt_kind == SGX_RT_UNORM8 && !blend->rt_srgb && !blend->rt_intensity &&
+       !getenv("SGX_NO_SOP2") && sop2_blend(blend, &c.sop2_factors, &c.sop2_swap)) {
       c.sop2 = true;
       blending = false;
    }
    /* a logic op instead of the blending, and the colour mask with it: on
     * the bytes, in output() (nir_lower_blend's are integer operations,
     * which the compiler has not) */
-   if (blend && blend->logicop) {
+   if (blend && blend->logicop && blend->rt_kind == SGX_RT_UNORM8) {
       c.logicop = blend->logicop - 1;
       blending = false;
    }
@@ -2715,6 +2840,17 @@ compile_fs(const nir_shader *fs, const struct sgx_blend_key *blend, char *why,
             type_size_vec4, 0);
    if (blending)
       lower_blend(s, blend);
+   /* (M43) an sRGB target: the colour encoded as it goes out, the tile's
+    * decoded as blending reads it (nir_lower_blend leaves both to us) */
+   if (blend && blend->rt_srgb)
+      NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_srgb_target, nir_metadata_control_flow,
+               NULL);
+   /* (M43) an intensity target keeps R in all four: blending later in the
+    * same render reads its alpha as the intensity, as GL has it (the
+    * background loads it R R R R too) */
+   if (blend && blend->rt_intensity)
+      NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_intensity_target,
+               nir_metadata_control_flow, NULL);
    {
       /* (rectangle textures: the state tracker scales their coordinates
        * already -- caps.texrect off -- and leaves the dimension Rect) */
