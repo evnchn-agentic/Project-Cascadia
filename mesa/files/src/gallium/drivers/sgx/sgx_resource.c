@@ -673,10 +673,48 @@ sgx_resource_texture(struct sgx_context *ctx, struct sgx_resource *res,
    return true;
 }
 
+/* Every buffer here is linear (resource_get_handle says so), and that is the one layout the
+ * kernel's plane takes. A client that asks with modifiers -- mpv's DRM output, through
+ * gbm_surface_create_with_modifiers, when the plane lists IN_FORMATS -- gets it; any other
+ * modifier is refused, as before. */
+static struct pipe_resource *
+sgx_resource_create_with_modifiers(struct pipe_screen *pscreen, const struct pipe_resource *templ,
+                                   const uint64_t *modifiers, int count)
+{
+   for (int i = 0; i < count; i++)
+      if (modifiers[i] == DRM_FORMAT_MOD_LINEAR || modifiers[i] == DRM_FORMAT_MOD_INVALID)
+         return sgx_resource_create(pscreen, templ);
+   return NULL;
+}
+
+static void
+sgx_query_dmabuf_modifiers(struct pipe_screen *pscreen, enum pipe_format format, int max,
+                           uint64_t *modifiers, unsigned int *external_only, int *count)
+{
+   *count = 1;
+   if (max >= 1) {
+      modifiers[0] = DRM_FORMAT_MOD_LINEAR;
+      if (external_only)
+         external_only[0] = 0;
+   }
+}
+
+static bool
+sgx_is_dmabuf_modifier_supported(struct pipe_screen *pscreen, uint64_t modifier,
+                                 enum pipe_format format, bool *external_only)
+{
+   if (external_only)
+      *external_only = false;
+   return modifier == DRM_FORMAT_MOD_LINEAR;
+}
+
 void
 sgx_resource_screen_init(struct sgx_screen *screen)
 {
    screen->base.resource_create = sgx_resource_create;
+   screen->base.resource_create_with_modifiers = sgx_resource_create_with_modifiers;
+   screen->base.query_dmabuf_modifiers = sgx_query_dmabuf_modifiers;
+   screen->base.is_dmabuf_modifier_supported = sgx_is_dmabuf_modifier_supported;
    screen->base.resource_destroy = sgx_resource_destroy;
    screen->base.resource_get_handle = sgx_resource_get_handle;
    screen->base.resource_from_handle = sgx_resource_from_handle;
