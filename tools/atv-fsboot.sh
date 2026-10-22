@@ -2,8 +2,10 @@
 #
 # Boot Linux from the Apple TV's own storage: kloader chain.kload from iOS (iBEC does the init,
 # then jumps to iBoot.fsboot stashed in /vram, tools/mk-chain-kloader.py), and iBoot autoboots
-# /linux.kc (tools/mk-fake-kc.py) off the system partition. Nothing is uploaded over USB; VBUS
-# stays on only so the USB link to Linux can confirm the boot.
+# /linux.kc (tools/mk-fake-kc.py) off the system partition. Nothing is uploaded over USB.
+# kloader sleeps iOS and runs the image on WAKE. WAKE=lan (default) wakes it with a Wake-on-LAN
+# packet to iOS's en0, USB power off throughout, and finds Linux on the LAN (DHCP on eth0).
+# WAKE=usb wakes it with a VBUS edge and confirms over the USB link, as before.
 #
 #   tools/atv-fsboot.sh install     write /linux.kc to the system partition (needs evnchn's yes)
 #   tools/atv-fsboot.sh remove      rm /linux.kc
@@ -39,11 +41,27 @@ for try in $(seq "${1:-6}"); do
     $CTL ios-boot >/dev/null || continue
     atv "test -s /linux.kc" || { echo "no /linux.kc on the device (run: $0 install)" >&2; exit 2; }
     put "${LIK:-$HOME/Legacy-iOS-Kit}/resources/kloader/kloader" /tmp/ && put "$FW/chain.kload" /tmp/ || continue
+    mac=$(atv "ifconfig en0" | awk '/ether/{print $2}')
+    [ "${WAKE:-lan}" = lan ] && $CTL vbus off >/dev/null
     timeout 20 sshpass -p alpine ssh "${O[@]}" "$ATV" "chmod +x /tmp/kloader; /tmp/kloader /tmp/chain.kload" >/dev/null 2>&1
-    # The gadget enumerates only after a VBUS edge, as on every other route here: give Linux
-    # ~60 s to boot, replug, then wait for the link.
-    sleep 60
-    $CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
-    timeout 200 bash "$ROOT/tools/host-link.sh" && { echo "==> Linux up from /linux.kc (try $try)"; exit 0; }
+    if [ "${WAKE:-lan}" = lan ]; then
+        sleep 20
+        python3 -c 'import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1); [s.sendto(b"\xff"*6+bytes.fromhex(sys.argv[1].replace(":",""))*16,("255.255.255.255",9)) for _ in range(5)]' "$mac"
+        for _ in $(seq 12); do
+            sleep 10
+            for i in $(seq 2 254); do ping -c1 -t1 192.168.50.$i >/dev/null 2>&1 & done; wait
+            for ip in $(arp -an | grep -oE '192\.168\.50\.[0-9]+' | sort -u); do
+                timeout 6 ssh -F /dev/null -i ~/.ssh/id_rsa -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 \
+                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@$ip \
+                    'grep -q AppleTV3 /proc/device-tree/model' 2>/dev/null && echo "$ip" > "$FW/.linux-ip" &
+            done; wait
+            [ -s "$FW/.linux-ip" ] && { echo "==> Linux up from /linux.kc at $(cat "$FW/.linux-ip") (try $try)"; rm -f "$FW/.linux-ip"; exit 0; }
+        done
+    else
+        # A VBUS edge wakes the image and later enumerates the gadget.
+        sleep 30
+        $CTL vbus off >/dev/null; sleep 3; $CTL vbus on >/dev/null
+        timeout 200 bash "$ROOT/tools/host-link.sh" && { echo "==> Linux up from /linux.kc (try $try)"; exit 0; }
+    fi
 done
 echo "no boot after ${1:-6} tries" >&2; exit 1
