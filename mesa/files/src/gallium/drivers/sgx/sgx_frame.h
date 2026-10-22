@@ -296,17 +296,38 @@ int sgx_frame_upload_vs(struct sgx_frame *f, struct sgx_vs *vs);
  * uploaded again if drawn after all) */
 void sgx_frame_retire(struct sgx_frame *f, struct sgx_pixel_program *p);
 void sgx_frame_retire_vs(struct sgx_frame *f, struct sgx_vs *vs);
+/* How the ISP keeps depth and stencil in memory: ZLSCTL's formats (bits
+ * 25:24 stored, 22:21 loaded) */
+enum sgx_zls_format {
+   SGX_ZLS_F32 = 0,     /* F32 depth alone, 4 bytes a pixel */
+   SGX_ZLS_D24S8 = 1,   /* 24-bit depth, the stencil in the top byte */
+   /* (M43) F32 depth and the stencil, 5 bytes a pixel: the stencil, then
+    * the depth as a key that sorts as an integer, most significant byte
+    * first, in a stream each 16 bytes of which are stored reversed
+    * (sgx_resource.c) */
+   SGX_ZLS_F32S8 = 3,
+};
+
+static inline enum sgx_zls_format
+sgx_zls_format(enum pipe_format f)
+{
+   return f == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT ? SGX_ZLS_F32S8 :
+          f == PIPE_FORMAT_Z24_UNORM_S8_UINT ? SGX_ZLS_D24S8 : SGX_ZLS_F32;
+}
+
 /* The depth buffer a render loads its tiles' depth from, stores it to, or
- * both (M24, the ISP's z load/store): 32 x 32 F32 tiles, 4 KiB each, rows
- * of tiles an even number long (sgx_frame_zls_size()) */
+ * both (M24, the ISP's z load/store): 32 x 32 tiles, 4 KiB each (5 KiB
+ * with SGX_ZLS_F32S8), rows of tiles an even number long
+ * (sgx_frame_zls_size()) */
 struct sgx_frame_zls {
    struct sgx_bo *bo;
    unsigned w;         /* the depth buffer's width, pixels */
    bool load;          /* else the tiles start at depth_clear */
    bool store;
-   bool stencil;       /* stencil too: 24-bit depth with it in the top byte */
+   bool stencil;       /* stencil too */
+   enum sgx_zls_format format;
 };
-uint32_t sgx_frame_zls_size(unsigned w, unsigned h);
+uint32_t sgx_frame_zls_size(unsigned w, unsigned h, enum sgx_zls_format format);
 
 /* n draws (at most SGX_FRAME_MAX_DRAWS) in one render into t, in order,
  * over what it holds: the depth test holds across them, from depth_clear

@@ -983,7 +983,8 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
 
       /* (the level's own, M43) */
       if ((load || store) && !zt->bo) {
-         zt->bo = sgx_bo_create(&screen->dev, sgx_frame_zls_size(zw, zh), 0, 0);
+         zt->bo = sgx_bo_create(&screen->dev,
+                                sgx_frame_zls_size(zw, zh, sgx_zls_format(b->zs->format)), 0, 0);
          zt->valid = false;
          load = false;
       }
@@ -993,6 +994,7 @@ sgx_batch_flush_at(struct sgx_context *ctx, const char *file, int line)
          zls.load = load;
          zls.store = store;
          zls.stencil = util_format_has_stencil(util_format_description(b->zs->format));
+         zls.format = sgx_zls_format(b->zs->format);
       }
    }
    /* a render that starts from a clear stores only the tiles it draws in:

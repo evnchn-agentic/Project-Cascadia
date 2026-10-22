@@ -142,8 +142,11 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
          return false;
    }
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
+      /* (the tiles hold F32 depth whatever the format: M43's Z32F with or
+       * without stencil as the ISP stores them, ARB_depth_buffer_float) */
       if (format != PIPE_FORMAT_Z24_UNORM_S8_UINT && format != PIPE_FORMAT_Z16_UNORM &&
-          format != PIPE_FORMAT_Z24X8_UNORM)
+          format != PIPE_FORMAT_Z24X8_UNORM && format != PIPE_FORMAT_Z32_FLOAT &&
+          format != PIPE_FORMAT_Z32_FLOAT_S8X24_UINT)
          return false;
    }
    if (usage & PIPE_BIND_SAMPLER_VIEW) {
@@ -198,10 +201,12 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       /* (and R and RG of bytes, RGBA8's copy: ARB_texture_rg's sampling) */
       case PIPE_FORMAT_R8_UNORM: case PIPE_FORMAT_R8G8_UNORM:
       /* depth (GLES 2 has OES_depth_texture whatever the driver says): its
-       * copy grey, 8 bits of it (sgx_resource.c) */
+       * copy F32 (M37, sgx_resource.c) */
       case PIPE_FORMAT_Z16_UNORM:
       case PIPE_FORMAT_Z24X8_UNORM:
       case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+      case PIPE_FORMAT_Z32_FLOAT:
+      case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
          break;
       default:
          return false;

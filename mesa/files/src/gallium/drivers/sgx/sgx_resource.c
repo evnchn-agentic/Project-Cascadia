@@ -745,10 +745,16 @@ sgx_resource_screen_init(struct sgx_screen *screen)
  * ISP stores them (M24, res->zls): 32 x 32 pixels a tile, row by row, 4
  * bytes a pixel -- F32 depth alone, or 24-bit depth with the stencil in the
  * top byte -- tile (x, y) at (x + y * S) * 4 KiB, S two tiles for every 64
- * pixels of the width (the level's).  A map of a level's layer brings the
- * resource's own linear copy of it, in its format, up to date from them (or
- * from a clear no render has done yet); an unmap that wrote puts it back,
- * for the next render to load. */
+ * pixels of the width (the level's).  F32 depth with stencil (M43,
+ * SGX_ZLS_F32S8): 5 bytes a pixel, 5 KiB a tile, each row of 32 a stream
+ * of 160 bytes -- for each pixel the stencil, then the depth's bits as a
+ * key that sorts as an integer (a positive float's sign bit flipped, a
+ * negative one's every bit), most significant byte first -- each 16 bytes
+ * of which are stored reversed (found from a pattern of known depths and
+ * stencils, every pixel of a 256 x 256 buffer).  A map of a level's layer
+ * brings the resource's own linear copy of it, in its format, up to date
+ * from them (or from a clear no render has done yet); an unmap that wrote
+ * puts it back, for the next render to load. */
 struct sgx_zls *
 sgx_resource_zls(struct sgx_resource *res, unsigned level, unsigned layer)
 {
@@ -773,6 +779,69 @@ zls_texel(const struct sgx_zls *zls, unsigned w, unsigned x, unsigned y)
           (y % 32) * 32 + x % 32;
 }
 
+/* (M43) an SGX_ZLS_F32S8 pixel's byte i (0 the stencil, 1..4 the key) */
+static uint8_t *
+zls_f32s8_byte(const struct sgx_zls *zls, unsigned w, unsigned x, unsigned y, unsigned i)
+{
+   unsigned s = 2 * DIV_ROUND_UP(w, 64), at = 5 * (x % 32) + i;
+
+   return zls->bo->map + (x / 32 + y / 32 * s) * 5120 + (y % 32) * 160 + (at & ~15u) +
+          15 - at % 16;
+}
+
+/* pixel (x, y)'s depth and stencil as the ISP stored them in format f */
+static void
+zls_get(const struct sgx_zls *zls, enum sgx_zls_format f, unsigned w, unsigned x, unsigned y,
+        float *z, uint8_t *st)
+{
+   uint32_t wd;
+
+   if (f == SGX_ZLS_F32S8) {
+      uint32_t key = 0;
+
+      for (unsigned i = 1; i <= 4; i++)
+         key = key << 8 | *zls_f32s8_byte(zls, w, x, y, i);
+      wd = key & 0x80000000u ? key ^ 0x80000000u : ~key;
+      memcpy(z, &wd, 4);
+      *st = *zls_f32s8_byte(zls, w, x, y, 0);
+      return;
+   }
+   wd = *zls_texel(zls, w, x, y);
+   if (f == SGX_ZLS_D24S8) {
+      *z = (wd & 0xffffff) / 16777215.0f;
+      *st = wd >> 24;
+   } else {
+      memcpy(z, &wd, 4);
+      *st = 0;
+   }
+}
+
+static void
+zls_put(const struct sgx_zls *zls, enum sgx_zls_format f, unsigned w, unsigned x, unsigned y,
+        float z, uint8_t st)
+{
+   uint32_t wd;
+
+   if (f == SGX_ZLS_F32S8) {
+      uint32_t key;
+
+      memcpy(&wd, &z, 4);
+      key = wd & 0x80000000u ? ~wd : wd ^ 0x80000000u;
+      *zls_f32s8_byte(zls, w, x, y, 0) = st;
+      for (unsigned i = 1; i <= 4; i++)
+         *zls_f32s8_byte(zls, w, x, y, i) = key >> (32 - 8 * i);
+      return;
+   }
+   if (f == SGX_ZLS_D24S8) {
+      /* (in doubles: 1.0 in floats came to 2^24, a carry into the
+       * stencil) */
+      wd = (uint32_t)st << 24 | (uint32_t)(CLAMP(z, 0.0f, 1.0f) * 16777215.0 + 0.5);
+   } else {
+      memcpy(&wd, &z, 4);
+   }
+   *zls_texel(zls, w, x, y) = wd;
+}
+
 static bool
 zs_to_linear(struct sgx_resource *res, unsigned level, unsigned layer)
 {
@@ -782,6 +851,7 @@ zs_to_linear(struct sgx_resource *res, unsigned level, unsigned layer)
    bool stencil = util_format_has_stencil(util_format_description(p->format));
    bool depth = util_format_has_depth(util_format_description(p->format));
    bool tiles = zls && zls->bo && zls->valid && sgx_bo_map(zls->bo);
+   enum sgx_zls_format f = sgx_zls_format(p->format);
    uint8_t *map = sgx_bo_map(res->bo);
    float *z = MALLOC(w * sizeof(float));
    uint8_t *st = MALLOC(w);
@@ -804,15 +874,10 @@ zs_to_linear(struct sgx_resource *res, unsigned level, unsigned layer)
                      y * res->stride[level];
 
       for (unsigned x = 0; x < w; x++) {
-         uint32_t wd = tiles ? *zls_texel(zls, w, x, y) : 0;
-
-         if (stencil) {
-            z[x] = (wd & 0xffffff) / 16777215.0f;
-            st[x] = wd >> 24;
-         } else {
-            memcpy(&z[x], &wd, 4);
-            st[x] = 0;
-         }
+         z[x] = 0;
+         st[x] = 0;
+         if (tiles)
+            zls_get(zls, f, w, x, y, &z[x], &st[x]);
          if (zls->cleared)
             z[x] = zls->clear;
       }
@@ -835,12 +900,13 @@ linear_to_zs(struct sgx_screen *screen, struct sgx_resource *res, unsigned level
    unsigned lw = u_minify(p->width0, level), lh = u_minify(p->height0, level);
    bool stencil = util_format_has_stencil(util_format_description(p->format));
    bool depth = util_format_has_depth(util_format_description(p->format));
+   enum sgx_zls_format f = sgx_zls_format(p->format);
    uint8_t *map = sgx_bo_map(res->bo);
    float *z = MALLOC(lw * sizeof(float));
    uint8_t *st = MALLOC(lw);
 
    if (zls && !zls->bo) {
-      zls->bo = sgx_bo_create(&screen->dev, sgx_frame_zls_size(lw, lh), 0, 0);
+      zls->bo = sgx_bo_create(&screen->dev, sgx_frame_zls_size(lw, lh, f), 0, 0);
       zls->valid = false;
    }
    if (map && z && st && zls && zls->bo && sgx_bo_map(zls->bo)) {
@@ -853,19 +919,8 @@ linear_to_zs(struct sgx_screen *screen, struct sgx_resource *res, unsigned level
             util_format_unpack_z_float(p->format, z, row, lw);
          if (stencil)
             util_format_unpack_s_8uint(p->format, st, row, lw);
-         for (unsigned x = 0; x < lw; x++) {
-            uint32_t w;
-
-            if (stencil) {
-               /* (in doubles: 1.0 in floats came to 2^24, a carry into the
-                * stencil) */
-               w = (uint32_t)st[x] << 24 |
-                   (depth ? (uint32_t)(CLAMP(z[x], 0.0f, 1.0f) * 16777215.0 + 0.5) : 0);
-            } else {
-               memcpy(&w, &z[x], 4);
-            }
-            *zls_texel(zls, lw, x, y) = w;
-         }
+         for (unsigned x = 0; x < lw; x++)
+            zls_put(zls, f, lw, x, y, depth ? z[x] : 0, stencil ? st[x] : 0);
       }
       zls->valid = true;
       zls->cleared = false;

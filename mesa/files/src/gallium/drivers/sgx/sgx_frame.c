@@ -1509,27 +1509,33 @@ state_size(uint32_t *full, unsigned w, unsigned h)
 }
 
 uint32_t
-sgx_frame_zls_size(unsigned w, unsigned h)
+sgx_frame_zls_size(unsigned w, unsigned h, enum sgx_zls_format format)
 {
-   return 2 * DIV_ROUND_UP(w, 64) * DIV_ROUND_UP(h, 32) * 4096;
+   return 2 * DIV_ROUND_UP(w, 64) * DIV_ROUND_UP(h, 32) * (format == SGX_ZLS_F32S8 ? 5120 : 4096);
 }
 
 /* ZLSCTL (register 0x480), from iOS's depth capture (0x0015100c, a store)
  * and flipping its bits (M23, M24): bit 2 stores the tiles' depth, 17 their
  * stencil (16 with it); 14 loads depth (1 with it), 13 stencil; the format
  * stored in bits 25:24, loaded in 22:21 -- 0 F32, 1 24-bit with stencil in
- * the top byte, 2 16-bit; bits 10:4 the rows of tiles in twos less 1 (tile
- * x, y at (x + y * 2 * (v + 1)) * 4 KiB); 12 and 18 needed.  Tiles a render
- * draws nothing in are neither loaded nor stored.  SGX_ZLS_CTL=value:
- * another (the extent put in). */
+ * the top byte, 2 16-bit, 3 F32 and stencil in 5 bytes (M43); bits 10:4
+ * the rows of tiles in twos less 1 (tile x, y at (x + y * 2 * (v + 1)) *
+ * 4 KiB, 5 KiB in format 3); 12 and 18 needed.  Tiles a render draws
+ * nothing in are neither loaded nor stored.  SGX_ZLS_CTL=value: another
+ * (the extent put in).  (vitasdk's GXM depth/stencil formats read as
+ * these bits: S8D24 0x01266000, D16 0x02444000, DF32M 0x00044000 and
+ * DF32M_S8 0x00066000, the last with a stencil surface of its own.  Format
+ * 0 with the stencil bits and a stencil buffer at the 3D block's +0x78,
+ * +0x7c -- registers 0x48c, 0x490, iOS's payload word 32, 0 there --
+ * neither stored nor loaded the stencil, as an offset from the ZLS base
+ * or an address.) */
 static uint32_t
 zls_ctl(const struct sgx_frame_zls *zls)
 {
    const char *e = getenv("SGX_ZLS_CTL");
    uint32_t ctl = 0x00151000;
 
-   if (zls->stencil)
-      ctl |= 0x01200000;
+   ctl |= (uint32_t)zls->format << 24 | (uint32_t)zls->format << 21;
    if (zls->store)
       ctl |= 0xc | (zls->stencil ? 0x20000 : 0);
    if (zls->load)

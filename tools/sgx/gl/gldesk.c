@@ -3,8 +3,8 @@
  * and luminance, decoded or not), a rectangle texture (unnormalized
  * coordinates), the fixed-function pipeline (glBegin and client arrays, a
  * texture modulated by the vertex colour), flat shading, occlusion queries
- * and logic ops (M37).  A 64 x 64 target, every pixel
- * read back against what C works out.
+ * and logic ops (M37), float depth buffers (M43).  A 64 x 64 target,
+ * every pixel read back against what C works out.
  *
  *   sgx-gl gldesk [CASE]        (CASE: a name's start; all by default)
  */
@@ -350,6 +350,198 @@ depth_cases(void)
 	glActiveTexture(GL_TEXTURE0);
 }
 
+/* (M43) float depth buffers (ARB_depth_buffer_float): GL_DEPTH32F_STENCIL8
+ * -- the ISP's F32-and-stencil store -- and GL_DEPTH_COMPONENT32F, in an
+ * FBO of their own.  Two renders, a glFinish between: the left half at
+ * depth 0.25 and stencil 7, then green at 0.1 where the stencil is 7, then
+ * red at 0.3 where the depth passes -- green left, red right; the depth
+ * and stencil read back; and depths of 1e-7 steps (and stencils) from the
+ * CPU through a render that loads and stores them, read back exactly (a
+ * 24-bit store would round them). */
+static void
+zquad(float x0, float x1, float d)
+{
+	const float z = 2 * d - 1;
+	const float q[] = { x0, -1, z, x1, -1, z, x0, 1, z, x1, 1, z };
+
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(3, GL_FLOAT, 0, q);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+static void
+float_depth_cases(void)
+{
+	static const struct { const char *name; GLenum ifmt; int stencil; } f[] = {
+		{ "depth32f_stencil8", GL_DEPTH32F_STENCIL8, 1 },
+		{ "depth_component32f", GL_DEPTH_COMPONENT32F, 0 },
+	};
+	static struct { float d; uint32_t s; } up[W * H];
+	static float zr[W * H];
+	static uint8_t sr[W * H];
+
+	if (!strstr((const char *)glGetString(GL_EXTENSIONS), "GL_ARB_depth_buffer_float")) {
+		printf("%-36s skip: no ARB_depth_buffer_float\n", "float depth");
+		return;
+	}
+	glUseProgram(0);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	/* (its textures on a unit of their own: the later cases' are bound) */
+	glActiveTexture(GL_TEXTURE5);
+	for (unsigned k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
+		char name[64];
+		GLuint rt, zs, fb;
+		GLenum att = f[k].stencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
+		int bad;
+
+		snprintf(name, sizeof(name), "%s, two renders", f[k].name);
+		if (only && strncmp(name, only, strlen(only)) && strncmp(f[k].name, only, strlen(only)))
+			continue;
+		glGenTextures(1, &rt);
+		glBindTexture(GL_TEXTURE_2D, rt);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glGenRenderbuffers(1, &zs);
+		glBindRenderbuffer(GL_RENDERBUFFER, zs);
+		glRenderbufferStorage(GL_RENDERBUFFER, f[k].ifmt, W, H);
+		glGenFramebuffers(1, &fb);
+		glBindFramebuffer(GL_FRAMEBUFFER, fb);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, zs);
+		cases++;
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+			failed++;
+			printf("%-36s WRONG: the framebuffer is not complete\n", name);
+			glBindFramebuffer(GL_FRAMEBUFFER, desk_fbo);
+			continue;
+		}
+		glClearColor(0, 0, 0, 1);
+		glClearDepth(1.0);
+		glClearStencil(0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+		glEnable(GL_DEPTH_TEST);
+		glDepthFunc(GL_ALWAYS);
+		if (f[k].stencil) {
+			glEnable(GL_STENCIL_TEST);
+			glStencilFunc(GL_ALWAYS, 7, 0xff);
+			glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+		}
+		glColorMask(0, 0, 0, 0);
+		zquad(-1, 0, 0.25f);
+		glColorMask(1, 1, 1, 1);
+		glFinish();
+		glDepthFunc(GL_LESS);
+		if (f[k].stencil) {
+			glStencilFunc(GL_EQUAL, 7, 0xff);
+			glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+		}
+		glColor3f(0, 1, 0);
+		zquad(-1, 1, 0.1f);
+		glFinish();
+		glDisable(GL_STENCIL_TEST);
+		glColor3f(1, 0, 0);
+		zquad(-1, 1, 0.3f);
+		glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+		bad = 0;
+		for (int i = 0; i < W * H; i++) {
+			int left = i % W < W / 2;
+			/* (no stencil: green everywhere, then red where 0.3 < 0.1 -- nowhere) */
+			int green = left || !f[k].stencil;
+
+			bad += px[4 * i] != (green ? 0 : 255) || px[4 * i + 1] != (green ? 255 : 0);
+		}
+		if (bad) {
+			failed++;
+			printf("%-36s WRONG: %d pixels\n", name, bad);
+		} else {
+			printf("%-36s ok\n", name);
+		}
+		/* the depth and stencil as the CPU reads them */
+		snprintf(name, sizeof(name), "%s, read back", f[k].name);
+		cases++;
+		glReadPixels(0, 0, W, H, GL_DEPTH_COMPONENT, GL_FLOAT, zr);
+		if (f[k].stencil)
+			glReadPixels(0, 0, W, H, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sr);
+		bad = 0;
+		for (int i = 0; i < W * H; i++) {
+			int left = i % W < W / 2;
+			float wz = left || !f[k].stencil ? 0.1f : 0.3f;
+
+			bad += fabsf(zr[i] - wz) > 1e-6f || (f[k].stencil && sr[i] != (left ? 7 : 0));
+		}
+		if (bad) {
+			failed++;
+			printf("%-36s WRONG: %d pixels, the first %g %u\n", name, bad, zr[0],
+			       f[k].stencil ? sr[0] : 0);
+		} else {
+			printf("%-36s ok\n", name);
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, desk_fbo);
+		glDeleteFramebuffers(1, &fb);
+		glDeleteRenderbuffers(1, &zs);
+
+		/* from the CPU, through the GPU and back */
+		snprintf(name, sizeof(name), "%s, from the CPU", f[k].name);
+		cases++;
+		for (int i = 0; i < W * H; i++) {
+			up[i].d = (i + 1) * 1e-7f;
+			up[i].s = i & 0xff;
+			zr[i] = up[i].d;
+		}
+		glGenTextures(1, &zs);
+		glBindTexture(GL_TEXTURE_2D, zs);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		if (f[k].stencil)
+			glTexImage2D(GL_TEXTURE_2D, 0, f[k].ifmt, W, H, 0, GL_DEPTH_STENCIL,
+			             GL_FLOAT_32_UNSIGNED_INT_24_8_REV, up);
+		else
+			glTexImage2D(GL_TEXTURE_2D, 0, f[k].ifmt, W, H, 0, GL_DEPTH_COMPONENT, GL_FLOAT, zr);
+		glGenFramebuffers(1, &fb);
+		glBindFramebuffer(GL_FRAMEBUFFER, fb);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, zs, 0);
+		/* a render that loads and stores: one pixel's depth (and stencil)
+		 * written, at the top right */
+		glDepthFunc(GL_ALWAYS);
+		if (f[k].stencil) {
+			glEnable(GL_STENCIL_TEST);
+			glStencilFunc(GL_ALWAYS, 0x5a, 0xff);
+			glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+		}
+		zquad(1 - 2.0f / W, 1, 0.75f);
+		glDisable(GL_STENCIL_TEST);
+		glFinish();
+		glReadPixels(0, 0, W, H, GL_DEPTH_COMPONENT, GL_FLOAT, zr);
+		if (f[k].stencil)
+			glReadPixels(0, 0, W, H, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sr);
+		bad = 0;
+		for (int i = 0; i < W * H; i++) {
+			int drawn = i % W == W - 1;
+			float wz = drawn ? 0.75f : up[i].d;
+
+			bad += drawn ? fabsf(zr[i] - wz) > 1e-6f : zr[i] != wz;
+			bad += f[k].stencil && sr[i] != (drawn ? 0x5a : up[i].s);
+		}
+		if (bad) {
+			failed++;
+			printf("%-36s WRONG: %d pixels, the first %.9g (want %.9g) %u\n", name, bad, zr[0],
+			       up[0].d, f[k].stencil ? sr[0] : 0);
+		} else {
+			printf("%-36s ok\n", name);
+		}
+		glDisable(GL_DEPTH_TEST);
+		glBindFramebuffer(GL_FRAMEBUFFER, desk_fbo);
+		glDeleteFramebuffers(1, &fb);
+		glDeleteTextures(1, &zs);
+		glDeleteTextures(1, &rt);
+	}
+	glActiveTexture(GL_TEXTURE0);
+	glColor4f(1, 1, 1, 1);
+}
+
 /* the logic ops (M37): the target cleared to bytes 51 102 153 204, then
  * the program's colour -- bytes 32 i across, 32 j up, 128, 64 -- xor'ed
  * over it, through a colour mask, and with the left half discarded */
@@ -533,6 +725,7 @@ main(int argc, char **argv)
 	}
 
 	depth_cases();
+	float_depth_cases();
 	glClearColor(0, 0, 0, 0);
 	flat_case("flat shading, the last vertex");
 	if (strstr((const char *)glGetString(GL_EXTENSIONS), "GL_ARB_provoking_vertex")) {
