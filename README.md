@@ -1,5 +1,12 @@
 # Project Cascadia — Native Linux on Apple A5
 
+> **This fork: the Apple TV 3 port (AppleTV3,2 / J33i / S5L8947X), branch `j33i`.**
+> The same mainline 6.12 tree booted from the Apple TV's own NAND (iBoot fsboots
+> `/linux.kc`, no USB host needed): 1080p HDMI, HDMI audio, Ethernet, the IR
+> remote, and the SGX543 GPU with OpenGL ES 2.0 through Mesa. `tools/atv-demo` is
+> the remote-driven app it boots into. Notes: `docs/research/j33i-*.md`,
+> `docs/UPSTREAMING-j33i.md`. Upstream: [rzxvx/Project-Cascadia](https://github.com/rzxvx/Project-Cascadia).
+
 Mainline Linux 6.12 on an iPad mini 1 (iPad2,5 / S5L8942X), booting to an
 interactive shell — on the glass and over USB — and on to an XFCE desktop you
 drive with your fingers.
