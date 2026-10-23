@@ -6,6 +6,8 @@
 > remote, and the SGX543 GPU with OpenGL ES 2.0 through Mesa. `tools/atv-demo` is
 > the remote-driven app it boots into. Notes: `docs/research/j33i-*.md`,
 > `docs/UPSTREAMING-j33i.md`. Upstream: [rzxvx/Project-Cascadia](https://github.com/rzxvx/Project-Cascadia).
+>
+> ![atv-demo on the Apple TV 3 in auto-demo mode, captured from its HDMI output](imgs/appletv3-demo.gif)
 
 Mainline Linux 6.12 on an iPad mini 1 (iPad2,5 / S5L8942X), booting to an
 interactive shell — on the glass and over USB — and on to an XFCE desktop you
