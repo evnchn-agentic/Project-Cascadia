@@ -16,6 +16,7 @@
  *   sgx2d_fill4(xy[8])                     any four corners of it
  *   sgx2d_end()                            build, render; 0 or -errno
  *   sgx2d_finish()                         wait until the frame is on screen
+ *   sgx2d_caption()                        the SGX2D_CAPTION image, top right (before sgx2d_end)
  *
  * Corners go top left, top right, bottom right, bottom left.  Texels are
  * RGBA8 in memory order (R first).  Blend modes: BLEND src*a + dst*(1-a),
@@ -48,6 +49,7 @@ void sgx2d_fill(float x, float y, float w, float h);
 void sgx2d_fill4(const float xy[8]);
 int sgx2d_end(void);
 int sgx2d_finish(void);
+void sgx2d_caption(void);
 void sgx2d_stats(int *ntex, uint32_t *heap_free, uint32_t *ext_used);
 void sgx2d_frame_stats(int *quads, int *draws, int *dropped);	/* after sgx2d_end */
 uint32_t sgx2d_texture_addr(int id);

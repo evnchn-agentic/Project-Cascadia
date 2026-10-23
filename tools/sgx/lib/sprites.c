@@ -76,6 +76,7 @@ int main(int argc, char **argv)
 			if (sp[i].y < 0 || sp[i].y > H - sp[i].s) sp[i].dy = -sp[i].dy;
 			sgx2d_quad(tex[sp[i].t], sp[i].x, sp[i].y, sp[i].s, sp[i].s);
 		}
+		sgx2d_caption();
 		if ((ret = sgx2d_end())) {
 			fprintf(stderr, "frame %d: %d\n", f, ret);
 			return 1;

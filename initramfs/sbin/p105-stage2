@@ -369,6 +369,30 @@ printf '#!/bin/sh\nexec /bin/login -f root\n' > "$GLASS" && chmod 755 "$GLASS"
 use_getty=1
 [ -x /sbin/getty ] && [ -x "$GLASS" ] || use_getty=0
 quick=0
+# Apple TV show image: /etc/atv-demo (the DEMO build) puts the remote-driven demo app on the
+# TV instead of the shell; ssh and the ACM console above are unchanged.  Started again when it
+# exits; if it will not stay up (three exits inside 5 s) the shell gets the glass back.
+demo=0
+if [ -e /etc/atv-demo ] && [ -x /usr/local/bin/atv-demo ] \
+        && grep -q 'AppleTV3,2' /proc/device-tree/model 2>/dev/null; then
+    demo=1
+    msg "J33i: demo app on tty0 (/tmp/atv-demo.log)"
+fi
+dquick=0
+while [ "$demo" = 1 ]; do
+    t0=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    /usr/local/bin/atv-demo </dev/tty0 >/dev/tty0 2>>/tmp/atv-demo.log &
+    wait $!
+    t1=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    # put the console back in case it died without doing so (KILL, a crash)
+    /usr/local/bin/atv-demo --restore-tty 2>/dev/null
+    if [ "$((t1 - t0))" -lt 5 ]; then dquick=$((dquick + 1)); else dquick=0; fi
+    if [ "$dquick" -ge 3 ]; then
+        msg "J33i: atv-demo will not stay up -- shell on tty0 instead (/tmp/atv-demo.log)"
+        demo=0
+    fi
+    sleep 1
+done
 while :; do
     t0=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
     if [ "$use_getty" = 1 ]; then

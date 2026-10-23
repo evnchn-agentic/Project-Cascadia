@@ -52,6 +52,19 @@ u32 main(void)
 	line(6, "HEAD", DIM);
 	draw_u32(8 + 4 * 8 * SCALE, 40 + 6 * LINE, magic, FG);
 
+	/* The DTB rides at the end of the zImage, inside the area the decompressed kernel (with its
+	 * built-in initramfs) grows into: a 29.6 MB bundle overwrote it and the kernel died before its
+	 * first initcall. Hand Linux a copy at 0x88000000 instead -- iBoot's kernelcache buffer, free
+	 * by now and far above the decompressed image. Only if it is a real FDT. */
+	if (*(volatile u32 *)DTB_PHYS == 0xedfe0dd0u) {
+		volatile u32 *src = (volatile u32 *)DTB_PHYS, *dst = (volatile u32 *)0x88000000u;
+		u32 size = __builtin_bswap32(src[1]);
+		for (u32 i = 0; i < (size + 3) / 4; i++)
+			dst[i] = src[i];
+		line(7, "DTB copied to 88000000", DIM);
+		line(8, "jumping...", ACC);
+		return 0x88000000u;
+	}
 	line(7, "jumping...", ACC);
 
 	return DTB_PHYS;

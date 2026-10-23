@@ -59,6 +59,7 @@ int main(int argc, char **argv)
 		for (i = 0; i < 4; i++)
 			sgx2d_quad_uv(sh, 100 + i * 150 + 30 * cosf(f * 0.04f), 760, 128, 128,
 				      (i % 2) * 0.5f, (i / 2) * 0.5f, (i % 2) * 0.5f + 0.5f, (i / 2) * 0.5f + 0.5f);
+		sgx2d_caption();
 		if (sgx2d_end()) { fprintf(stderr, "frame %d failed\n", f); return 1; }
 	}
 	sgx2d_finish();

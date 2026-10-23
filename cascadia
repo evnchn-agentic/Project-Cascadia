@@ -244,7 +244,19 @@ cmd_build() {
     # Capture rather than pipe: a pipeline hands back the last command's status,
     # so a docker failure here used to surface as the far less useful "dtc
     # produced no dtb" with the real error scrolled past.
-    if ! out=$(in_docker "dtc -I dts -O dtb -f dts/$BOARD.dts -o dtb/$BOARD.dtb" 2>&1); then
+    # DEMO=1 (Apple TV): a self-contained show image -- quiet boot, no logo, no cursor; the
+    # demo app comes up on the TV instead of the console (stage 2, /etc/atv-demo below).
+    DTS="dts/$BOARD.dts"
+    # DEMO_QUIET=1 also quietens the kernel; off by default: that bootargs edit hung the boot
+    # right after the loader's jump (2026-10-22 22:2x), as other bootargs edits did on 10-21.
+    if [ "${DEMO:-0}" = 1 ] && [ "${DEMO_QUIET:-0}" = 1 ]; then
+        [ "$BOARD" = j33iap ] || fail "DEMO=1 is for BOARD=j33iap"
+        sed 's/loglevel=8 ignore_loglevel/quiet loglevel=3 logo.nologo vt.global_cursor_default=0/' \
+            "$ROOT/dts/$BOARD.dts" > "$ROOT/dtb/$BOARD.demo.dts"
+        grep -q 'logo.nologo' "$ROOT/dtb/$BOARD.demo.dts" || fail "DEMO=1: could not make the bootargs quiet"
+        DTS="dtb/$BOARD.demo.dts"
+    fi
+    if ! out=$(in_docker "dtc -I dts -O dtb -f $DTS -o dtb/$BOARD.dtb" 2>&1); then
         printf '%s\n' "$out" >&2
         fail "dtc failed -- see above"
     fi
@@ -356,6 +368,21 @@ cmd_build() {
             rm -rf "$ROOT/build/initramfs-root/usr/local/lib/sgx2d" "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2"
         fi
     fi
+    # J33i: the show-and-tell app (tools/atv-demo), driven by the IR remote.  Always in the
+    # Apple TV image, inert unless /etc/atv-demo exists (stage 2 then runs it on the TV
+    # instead of the console).  Its assets (font atlas, QR) come from
+    # tools/atv-demo/build.sh, which needs Python + Pillow, so they are made there, not here.
+    A="$ROOT/build/initramfs-root/usr/local"
+    if [ "$BOARD" = j33iap ] && [ -s "$ROOT/build/atv-demo/assets/fonts.bin" ]; then
+        rm -rf "$A/share/atv-demo"; mkdir -p "$A/bin" "$A/share/atv-demo"
+        in_docker "arm-linux-gnueabihf-gcc -O2 -static -mcpu=cortex-a9 -mfpu=neon -Wall -Wextra -o build/initramfs-root/usr/local/bin/atv-demo tools/atv-demo/atv-demo.c -lm"
+        [ -s "$A/bin/atv-demo" ] || fail "atv-demo did not build"
+        cp "$ROOT"/build/atv-demo/assets/{fonts.bin,qr.txt} "$A/share/atv-demo/"
+        note "ok: /usr/local/bin/atv-demo + assets ($(du -sk "$A/share/atv-demo" | awk '{print $1}') KiB)"
+    else
+        rm -rf "$A/bin/atv-demo" "$A/share/atv-demo"
+        if [ "$BOARD" = j33iap ]; then note "note: no atv-demo -- tools/atv-demo/build.sh makes its assets first"; fi
+    fi
     # No RTC on this board: without a stamp it boots at the epoch and every TLS
     # handshake fails on notBefore.  Written before the kernel build so it lands
     # inside the embedded initramfs.
@@ -422,6 +449,21 @@ cmd_build() {
     if [ -d "$ROOT/build/keep" ]; then
         cp -a "$ROOT/build/keep/." "$ROOT/build/initramfs-root/"
         note "ok: build/keep/ -> image ($(cd "$ROOT/build/keep" && find . -type f | wc -l | tr -d ' ') files)"
+    fi
+    # The demo image is self-contained: no NFS root (it would wait on a LAN that is not there),
+    # and the marker that makes stage 2 run the demo app. The dev image is the other way round.
+    if [ "${DEMO:-0}" = 1 ]; then
+        rm -f "$ROOT/build/initramfs-root/etc/nfsroot"
+        touch "$ROOT/build/initramfs-root/etc/atv-demo"
+        # Keep the bundle under the size that is known to boot (29.13 MB fine, 29.63 MB hung right
+        # after the loader's jump, 2026-10-22): what the Apple TV demo never uses goes. These are
+        # removed from the shared tree, so the next plain build restores them (./cascadia rootfs).
+        rm -rf "$ROOT/build/initramfs-root/usr/local/lib/sgx2d-mp2" \
+               "$ROOT/build/initramfs-root/usr/share/fonts" \
+               "$ROOT/build/initramfs-root/usr/lib/girepository-1.0"
+        note "ok: DEMO image -- no NFS root, demo app on the TV"
+    else
+        rm -f "$ROOT/build/initramfs-root/etc/atv-demo"
     fi
     # Not fatal: without it the image boots as before, just without touch.
     if [ ! -s "$ROOT/build/initramfs-root/lib/firmware/P105.mtprops" ]; then

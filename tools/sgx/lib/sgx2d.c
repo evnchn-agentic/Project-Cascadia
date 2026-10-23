@@ -849,3 +849,31 @@ int sgx2d_end(void)
 		return drm_kick(S.kick[0], S.kick[1], S.kick[2]);
 	return cmd("rkick 0x%x 0x%x 0x%x", S.kick[0], S.kick[1], S.kick[2]);
 }
+
+/* SGX2D_CAPTION=FILE: an image the caller made (width, height as little-endian uint32, then
+ * RGBA8), drawn 1:1 at the top right of each frame that calls this, last, so on top.  The Apple
+ * TV demo app uses it to say what a full-screen demo is showing.  No variable, no caption. */
+void sgx2d_caption(void)
+{
+	static int id = -2, w, h;
+	if (id == -2) {
+		const char *p = getenv("SGX2D_CAPTION");
+		FILE *f = p ? fopen(p, "rb") : NULL;
+		uint32_t hd[2];
+		id = -1;
+		if (f && fread(hd, 4, 2, f) == 2 && hd[0] && hd[1] && hd[0] <= 1024 && hd[1] <= 1024) {
+			size_t n = (size_t)hd[0] * hd[1];
+			void *px = malloc(n * 4);
+			if (px && fread(px, 4, n, f) == n && (id = sgx2d_texture(px, hd[0], hd[1])) >= 0)
+				w = hd[0], h = hd[1];
+			free(px);
+		}
+		if (f)
+			fclose(f);
+	}
+	if (id < 0)
+		return;
+	sgx2d_blend(SGX2D_BLEND);
+	sgx2d_color(1, 1, 1, 1);
+	sgx2d_quad(id, S.w - 96 - w, 96, w, h);
+}
